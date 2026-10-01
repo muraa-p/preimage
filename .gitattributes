@@ -1,0 +1,10 @@
+# Default to LF in the repo and on checkout. Without this, a Windows checkout
+# gives the bundled hooks CRLF endings, which bash reads as part of each line.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
