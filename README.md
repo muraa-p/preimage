@@ -221,7 +221,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 71 tests, node:test
+npm test          # 73 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs
 ```
