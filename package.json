@@ -1,0 +1,47 @@
+{
+  "name": "preimage",
+  "version": "0.1.0",
+  "description": "The undo layer for AI agents. A write-ahead journal for file and database changes, so an agent's bad edit is a rollback instead of an apology.",
+  "type": "module",
+  "bin": {
+    "preimage": "bin/preimage.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./mcp": "./src/mcp.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "integrations/",
+    "scripts/",
+    "!src/**/*.test.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:watch": "node --test --watch \"test/**/*.test.js\"",
+    "check": "node --check bin/preimage.js && node --check src/cli.js && node --check src/mcp.js && node --check src/journal.js && node --check src/capture.js && node --check src/dbadapter.js && node --check src/restore.js && node --check src/util.js"
+  },
+  "keywords": [
+    "ai-agent",
+    "undo",
+    "rollback",
+    "checkpoint",
+    "mcp",
+    "claude-code",
+    "codex",
+    "opencode",
+    "journal",
+    "write-ahead-log",
+    "data-loss",
+    "sqlite",
+    "local-first"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}

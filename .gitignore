@@ -1,0 +1,4 @@
+node_modules/
+.preimage/
+*.log
+.DS_Store
