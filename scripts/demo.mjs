@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Produces the terminal transcript used in the README.
 //
-//   node scripts/demo.mjs
+//   node scripts/demo.mjs            # instant, for reading
+//   node scripts/demo.mjs --paced    # with pauses, for recording (tape/demo.tape)
 //
 // It runs against a throwaway directory and exercises the two stories the
 // README leads with: a botched file edit, and a destructive SQLite migration.
@@ -26,8 +27,25 @@ const RESET = "\x1b[0m";
 const supportsColour = process.stdout.isTTY && process.env.NO_COLOR === undefined;
 const c = (code, text) => (supportsColour ? `${code}${text}${RESET}` : text);
 
+// Recording mode. vhs needs the output to arrive slowly enough to be read, and
+// the CLI itself finishes in milliseconds, so --paced holds each step open.
+// The text is identical either way, which keeps the README honest.
+const paced = process.argv.includes("--paced");
+const hold = (ms) => {
+	if (!paced) return;
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+const STEP_MS = 1400;
+const READ_MS = 2600;
+
 function step(label) {
 	process.stdout.write(`\n${c(BOLD, `$ ${label}`)}\n`);
+	hold(STEP_MS);
+}
+
+function note(text) {
+	process.stdout.write(`${c(DIM, "│")} ${c(YELLOW, text)}\n`);
+	hold(READ_MS);
 }
 
 function run(args) {
@@ -38,6 +56,7 @@ function show(output) {
 	for (const line of output.trimEnd().split("\n")) {
 		process.stdout.write(`${c(DIM, "│")} ${line}\n`);
 	}
+	hold(READ_MS);
 }
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-"));
@@ -60,6 +79,7 @@ try {
 	process.stdout.write(
 		`${c(DIM, "│")} ${c(YELLOW, "config.json rewritten, src/server.js deleted, EMERGENCY.js added")}\n`,
 	);
+	hold(READ_MS);
 
 	step(`preimage diff 1 --root <project>`);
 	show(run(["diff", "1", "--root", dir]));
@@ -95,6 +115,7 @@ try {
 	wreck.prepare("INSERT INTO users VALUES (?, ?, ?)").run(99, "ghost@x.com", "admin");
 	wreck.close();
 	process.stdout.write(`${c(DIM, "│")} ${c(YELLOW, "3 rows changed")}\n`);
+	hold(READ_MS);
 
 	step(`preimage diff ${dbCheckpoint} --root <project>`);
 	show(run(["diff", String(dbCheckpoint), "--root", dbDir]));

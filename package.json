@@ -48,3 +48,6 @@
   },
   "homepage": "https://github.com/muraa-p/preimage#readme",
   "bugs": { "url": "https://github.com/muraa-p/preimage/issues" },
+  "dependencies": {},
+  "license": "MIT"
+}
