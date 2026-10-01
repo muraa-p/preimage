@@ -296,7 +296,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 107 tests, node:test
+npm test          # 109 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story

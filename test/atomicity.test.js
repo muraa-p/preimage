@@ -165,6 +165,75 @@ test("a rollback inside transaction() leaves no partial rows", async (t) => {
 
 /* --- concurrency --------------------------------------------------------- */
 
+test("opening the journal works while another connection holds its write lock", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+
+	// A journal with its full schema, but deliberately NOT in WAL mode. This is
+	// the state a journal is in if it was created before WAL was set, or if the
+	// switch lost a race. Every schema statement is then a no-op read, so the
+	// only thing that can fail is the switch into WAL itself.
+	const first = Journal.open(root);
+	first.createCheckpoint({ root, label: "seed" });
+	first.db.exec("PRAGMA journal_mode = DELETE");
+	first.close();
+
+	const dbPath = path.join(root, ".preimage", "journal.db");
+	const { DatabaseSync } = await import("node:sqlite");
+	const blocker = new DatabaseSync(dbPath);
+	assert.equal(
+		blocker.prepare("PRAGMA journal_mode").get().journal_mode,
+		"delete",
+		"the precondition: this journal is not in WAL",
+	);
+	blocker.exec("BEGIN IMMEDIATE");
+	blocker.exec("CREATE TABLE IF NOT EXISTS t2 (b)");
+	blocker.exec("INSERT INTO t2 VALUES (1)");
+
+	try {
+		// This is where it used to fail. Switching a database into WAL needs a
+		// brief exclusive lock, and that switch does NOT honour busy_timeout: it
+		// gives up in about 0ms, measured, with the same 10s timeout set. So
+		// opening a journal while another process holds its lock must not treat
+		// the switch as fatal.
+		const j = Journal.open(root);
+		try {
+			assert.equal(j.listCheckpoints().length, 1, "the existing journal is still readable");
+		} finally {
+			j.close();
+		}
+	} finally {
+		try {
+			blocker.exec("ROLLBACK");
+		} catch {
+			// nothing open
+		}
+		blocker.close();
+	}
+});
+
+test("a journal is still created in WAL mode", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+	const j = Journal.open(root);
+	try {
+		assert.equal(
+			j.db.prepare("PRAGMA journal_mode").get().journal_mode,
+			"wal",
+			"readers must not block the write lock",
+		);
+	} finally {
+		j.close();
+	}
+	// And it stays in WAL when reopened, so the switch is never retried.
+	const again = Journal.open(root);
+	try {
+		assert.equal(again.db.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+	} finally {
+		again.close();
+	}
+});
+
 test("concurrent checkpoints all succeed instead of colliding on the journal", async (t) => {
 	const root = tmpRoot(t);
 	for (let i = 0; i < 30; i++) write(root, `f${i}.txt`, `content ${i} `);

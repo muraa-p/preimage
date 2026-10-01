@@ -68,7 +68,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 
-PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 `;
 
@@ -129,6 +128,41 @@ export function isRestorable(cp) {
 /** How long a writer waits for another's lock before giving up. */
 const BUSY_TIMEOUT_MS = 10_000;
 
+/**
+ * Put the journal into WAL mode, if it is not already, tolerating contention.
+ *
+ * WAL lets readers run during a write, which matters when a restore is reading
+ * the journal while a checkpoint writes to it. But switching a database into WAL
+ * needs a brief exclusive lock, and that switch does NOT honour `busy_timeout`:
+ * it fails with SQLITE_BUSY in about 0ms if any other connection holds a write
+ * lock, however long the timeout says to wait. Verified directly: against a
+ * locked database, the pragma fails in 0ms with the same 10s busy timeout set.
+ *
+ * Two things follow.
+ *
+ * The pragma is only issued when the database is not in WAL yet. Asserting it
+ * unconditionally -- which is what putting it in the schema string did -- made
+ * every single `preimage` command perform the switch, so any command overlapping
+ * another one could die with "database is locked". Once the journal is in WAL it
+ * stays there, and this becomes a cheap read.
+ *
+ * And a genuine first-time switch that does collide is not fatal. The loser of
+ * the race simply opens the journal in whatever mode the winner chose, which is
+ * WAL. Failing here would be the wrong trade: the journal still works, only
+ * concurrent readers block a little longer.
+ */
+function ensureWal(db) {
+	const { journal_mode: mode } = db.prepare("PRAGMA journal_mode").get();
+	if (String(mode).toLowerCase() === "wal") return;
+	try {
+		db.exec("PRAGMA journal_mode = WAL");
+	} catch (err) {
+		// 5 is SQLITE_BUSY. Another connection is mid-write and holds the lock
+		// this switch needs. Whoever is switching will get there.
+		if (err?.errcode !== 5) throw err;
+	}
+}
+
 export class Journal {
 	constructor(dbPath) {
 		ensureDir(journalDir(dbPath.replace(/[/\\]journal\.db$/, "")));
@@ -140,6 +174,7 @@ export class Journal {
 		// Agents run work in parallel, and `preimage checkpoint` is exactly the
 		// kind of thing several of them will reach for at once.
 		this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+		ensureWal(this.db);
 		this.db.exec(SCHEMA);
 		migrate(this.db);
 	}
