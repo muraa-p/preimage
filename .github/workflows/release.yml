@@ -3,16 +3,21 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
+# contents: write  -> create the GitHub release
+# id-token: write  -> required by `npm publish --provenance`, which is what puts
+#                     the "published from muraa-p/preimage@<sha>" stamp on the
+#                     package. Without it the publish step fails outright.
 permissions:
-  contents: read
+  contents: write
+  id-token: write
 
 jobs:
   publish:
     name: publish to npm
     runs-on: ubuntu-latest
-    # Publishing is irreversible, so only a tagged commit from main publishes.
+    # Publishing is irreversible, so only this repository publishes, and only a
+    # tag whose version matches package.json gets through.
     if: github.repository == 'muraa-p/preimage'
     steps:
       - uses: actions/checkout@v5
@@ -28,11 +33,21 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           WANTED="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$WANTED" ]; then
-            echo "tag $GITHUB_REF_NAME does not match package.json version $WANTED"
+            echo "refusing to publish: tag $GITHUB_REF_NAME does not match package.json version $WANTED"
             exit 1
           fi
 
-      - name: Install and test
+      - name: Confirm the version is not already on npm
+        run: |
+          set -euo pipefail
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "refusing to publish: $NAME@$VERSION already exists on npm"
+            exit 1
+          fi
+
+      - name: Test
         run: |
           npm install --no-audit --no-fund
           npm run check
@@ -43,8 +58,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Tag the release on GitHub
-        if: success()
+      - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
