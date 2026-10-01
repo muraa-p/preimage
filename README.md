@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@muraa-p/preimage.svg)](https://www.npmjs.com/package/@muraa-p/preimage)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-91%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-135%20passing-brightgreen)](#development)
 
 **The undo layer for AI agents.**
 
@@ -20,7 +20,7 @@ byte-for-byte — including database rows git has never heard of.
 ```
 $ preimage checkpoint "before agent refactor"
 checkpoint 0001 created
-  2 files, 44 B
+  2 files, 193 B
 
 $ # the agent has its way with your files
 $ preimage diff 1
@@ -32,6 +32,16 @@ diff against checkpoint 0001
     config.json
     src/server.js
     EMERGENCY.js
+
+--- a/config.json
++++ b/config.json
+@@ -1,4 +1,4 @@
+ {
+-  "port": 3000,
+-  "features": ["search"]
++  "port": 9999,
++  "features": ["search", "beta"]
+ }
 
 $ preimage restore 1 --purge
 restored checkpoint 0001 (before agent refactor)
@@ -324,6 +334,11 @@ PATH; **MCP has no such requirement** and is the path to use there. If you want
 hook behaviour on Windows, the script is four lines — call `preimage checkpoint
 --root <dir>` from whatever your harness runs before a write.
 
+> **The GIFs above were recorded before `diff` printed line-level hunks**, so
+> they show the file list without the patch. The transcripts below them are
+> regenerated from real runs and are current. Re-recording the GIFs needs
+> `vhs`, `ffmpeg` and `ttyd`; the tapes are in `tape/`.
+
 ## Safety design
 
 This tool deletes things, so the defaults are conservative.
@@ -402,7 +417,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 132 tests, node:test
+npm test          # 135 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story
