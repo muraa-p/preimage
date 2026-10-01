@@ -288,6 +288,11 @@ difference is that a hook snapshots *without the model asking*, so on the other
 agents you either rely on the model calling `preimage_checkpoint` or wrap your
 own command chain.
 
+The bundled hook scripts are bash. On Windows they need WSL or Git Bash on your
+PATH; **MCP has no such requirement** and is the path to use there. If you want
+hook behaviour on Windows, the script is four lines — call `preimage checkpoint
+--root <dir>` from whatever your harness runs before a write.
+
 ## Safety design
 
 This tool deletes things, so the defaults are conservative.

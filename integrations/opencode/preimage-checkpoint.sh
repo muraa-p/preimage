@@ -5,13 +5,13 @@
 # hook payload format. Wire it to whatever your harness calls before a mutating
 # command.
 #
-#   preimage hook install-opencode
+# OpenCode users can also just add the MCP server instead -- see the README.
 #
 # Manual wiring for an OpenCode plugin or a git pre-commit-style wrapper:
 #
-#   preimage-hook-checkpoint /path/to/project
+#   preimage hook install opencode   # prints the command to wire in
 #   your-dangerous-command
-#   preimage restore "$(cat .preimage/.last-result.json | jq -r .id)" --purge
+#   preimage restore <id> --purge
 
 set -uo pipefail
 
