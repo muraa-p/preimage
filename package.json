@@ -1,6 +1,6 @@
 {
   "name": "@muraa-p/preimage",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "The undo layer for AI agents. A write-ahead journal for file and database changes, so an agent's bad edit is a rollback instead of an apology.",
   "type": "module",
   "bin": {

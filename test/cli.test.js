@@ -201,6 +201,48 @@ test("diff --json carries the patch and its line counts", async (t) => {
 	assert.equal(v.patches[0].binary, false);
 });
 
+test("diff shows the contents of a file the agent created", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "keep.js", "untouched\n");
+	await run(["checkpoint", "--root", root]);
+
+	// The file an agent just created is the one most worth reviewing, and it
+	// used to be the one file whose contents the diff would not show. A user
+	// found that in a real session.
+	write(root, "NOTES.md", "# Scratch notes\n\n- port from PORT\n");
+	const { stdout } = await run(["diff", "--root", root]);
+	assert.match(stdout, /^--- \/dev\/null$/m, "the absent side is /dev/null, as in git");
+	assert.match(stdout, /^\+\+\+ b\/NOTES\.md$/m);
+	assert.match(stdout, /^\+# Scratch notes$/m, "the new file's contents are shown");
+	// The content itself starts with "- ", so the line is "+- port...": a
+	// leading minus in the content is not a removal marker on an added line.
+	assert.match(stdout, /^\+- port from PORT$/m);
+});
+
+test("diff shows the contents of a file the agent deleted", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "gone.js", "line one\nline two\n");
+	await run(["checkpoint", "--root", root]);
+	fs.rmSync(path.join(root, "gone.js"));
+
+	const { stdout } = await run(["diff", "--root", root]);
+	assert.match(stdout, /^--- a\/gone\.js$/m);
+	assert.match(stdout, /^\+\+\+ \/dev\/null$/m);
+	assert.match(stdout, /^-line one$/m, "the removed contents are shown");
+	assert.match(stdout, /^-line two$/m);
+});
+
+test("a one-line added file with no trailing newline is marked as such", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "seed.txt", "x");
+	await run(["checkpoint", "--root", root]);
+	fs.writeFileSync(path.join(root, "flag.txt"), "production");
+
+	const { stdout } = await run(["diff", "--root", root]);
+	assert.match(stdout, /^\+production$/m);
+	assert.match(stdout, /^\\ No newline at end of file$/m);
+});
+
 test("a binary file is reported as such rather than as an empty patch", async (t) => {
 	const root = tmpRoot(t);
 	fs.writeFileSync(path.join(root, "logo.png"), Buffer.from([0x89, 0x50, 0x00, 0x01]));

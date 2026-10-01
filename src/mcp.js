@@ -15,7 +15,7 @@ import { Journal, isRestorable } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
-import { unifiedDiff, renderUnified } from "./udiff.js";
+import { unifiedDiff, renderUnified, filePatch, hunkCounts } from "./udiff.js";
 import { journalDir, ensureDir, humanBytes, shortId } from "./util.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -132,7 +132,7 @@ const PATCH_FILE_LIMIT = 20;
 const PATCH_BYTE_LIMIT = 60_000;
 
 /**
- * Unified diffs for modified text files, with a hard byte budget.
+ * Unified diffs for every changed file, with a hard byte budget.
  *
  * The budget is the point. An agent asking "what did I change" is the single most
  * useful question preimage can answer, but a diff of a large refactor is
@@ -140,32 +140,44 @@ const PATCH_BYTE_LIMIT = 60_000;
  * conversation for something the agent could have re-read selectively. So the
  * budget is spent largest-diff-first on the files that changed most, and what was
  * left out is reported rather than silently dropped.
+ *
+ * Added and removed files are included, not just modified ones. A user found the
+ * gap in a real session: the agent could see that it had created NOTES.md but
+ * not what was in it, which is the file most worth reviewing.
  */
-function buildPatches(journal, id, root, modified, { maxFiles, maxBytes }) {
+function buildPatches(journal, id, root, changed, { maxFiles, maxBytes }) {
 	const candidates = [];
-	for (const item of modified) {
-		const rel = typeof item === "string" ? item : item.path;
-		const row = journal.getFile(id, rel);
-		if (!row) continue;
-		const before = journal.getBlob(row.sha);
-		if (!before) continue;
-		let after;
-		try {
-			after = fs.readFileSync(path.join(root, ...rel.split("/")));
-		} catch {
-			continue;
+	const consider = (rel, kind) => {
+		let before = null;
+		let after = null;
+		if (kind !== "added") {
+			const row = journal.getFile(id, rel);
+			before = row ? journal.getBlob(row.sha) : null;
+			if (!before) return;
 		}
-		const { hunks, binary, reason } = unifiedDiff(before, after);
-		if (hunks.length === 0 && !reason) continue;
+		if (kind !== "removed") {
+			try {
+				after = fs.readFileSync(path.join(root, ...rel.split("/")));
+			} catch {
+				return;
+			}
+		}
+		const { hunks, binary, reason, from, to } = filePatch(rel, before, after);
+		if (hunks.length === 0 && !reason) return;
 		candidates.push({
 			path: rel,
+			kind,
 			binary: Boolean(binary),
 			reason: reason ?? null,
-			added: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("+")).length, 0),
-			removed: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("-")).length, 0),
-			patch: renderUnified(`a/${rel}`, `b/${rel}`, hunks),
+			...hunkCounts(hunks),
+			patch: renderUnified(from, to, hunks),
 		});
-	}
+	};
+
+	const pathOf = (item) => (typeof item === "string" ? item : item.path);
+	for (const item of changed.added) consider(pathOf(item), "added");
+	for (const item of changed.modified) consider(pathOf(item), "modified");
+	for (const item of changed.removed) consider(pathOf(item), "removed");
 
 	// Biggest change first, so a truncated result still covers what matters.
 	candidates.sort((a, b) => b.patch.length - a.patch.length);
@@ -285,7 +297,11 @@ function handleTool(name, args, root) {
 					journal,
 					cp.id,
 					root,
-					files.modified,
+					{
+						added: files.added,
+						modified: files.modified,
+						removed: files.removed,
+					},
 					{ maxFiles: PATCH_FILE_LIMIT, maxBytes: PATCH_BYTE_LIMIT },
 				);
 

@@ -322,3 +322,45 @@ export function renderUnified(fromLabel, toLabel, hunks) {
 	}
 	return out.join("\n");
 }
+
+/**
+ * A patch for one changed file, whatever kind of change it is.
+ *
+ * Added and removed files get patches too, with the absent side labelled
+ * `/dev/null` exactly as git does. This started out handling only modified
+ * files, which meant the most interesting file in a change -- the one the agent
+ * just created -- was the one file whose contents you could not see. A user
+ * found that during a real session: "NOTES.md is in the added list but the tool
+ * returns no patch content for new files."
+ *
+ * `before` and `after` may be null for a file that does not exist on that side.
+ */
+export function filePatch(rel, before, after) {
+	const from = before === null ? "/dev/null" : `a/${rel}`;
+	const to = after === null ? "/dev/null" : `b/${rel}`;
+	const b = before ?? Buffer.alloc(0);
+	const a = after ?? Buffer.alloc(0);
+
+	// A file that changed only in its trailing newline still has a last line
+	// either side, so that comparison stays meaningful. For a wholly absent side
+	// there is nothing to compare, and the file reads as a pure add or remove.
+	if (before !== null && after !== null && b.byteLength === 0 && a.byteLength > 0 && !after.includes(10)) {
+		return { hunks: [{ aStart: 0, aCount: 0, bStart: 1, bCount: 1, heading: null, body: ["+" + after.toString("utf8")] }], binary: false, reason: null };
+	}
+
+	const { hunks, binary, reason } = unifiedDiff(b, a);
+	return { hunks, binary, reason, from, to };
+}
+
+/** Count the added and removed lines in a set of hunks. */
+export function hunkCounts(hunks) {
+	let added = 0;
+	let removed = 0;
+	for (const h of hunks) {
+		for (const line of h.body) {
+			if (line.startsWith("+")) added++;
+			else if (line.startsWith("-")) removed++;
+		}
+	}
+	return { added, removed };
+}

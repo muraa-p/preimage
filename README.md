@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@muraa-p/preimage.svg)](https://www.npmjs.com/package/@muraa-p/preimage)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-153%20passing-brightgreen)](#development)
 
 **The undo layer for AI agents.**
 
@@ -36,6 +36,11 @@ diff against checkpoint 0001
   3 unchanged
     config.js
     DEBUG.md
+
+--- /dev/null
++++ b/DEBUG.md
+@@ -0,0 +1 @@
++# scratch notes, will delete later
 
 --- a/config.js
 +++ b/config.js
@@ -429,7 +434,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 149 tests, node:test
+npm test          # 153 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story

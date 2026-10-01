@@ -172,6 +172,32 @@ test("diff includes a unified patch so the agent can see what it changed", async
 	assert.match(diff.patches[0].patch, /^@@ /m);
 });
 
+test("diff shows the contents of files the agent created and deleted", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "keep.js", "untouched\n");
+	write(root, "old.js", "going away\n");
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+	write(root, "NOTES.md", "# Scratch notes\n");
+	fs.rmSync(path.join(root, "old.js"));
+
+	const diff = payload(await mcp.request("tools/call", { name: "preimage_diff", arguments: {} }));
+	const byPath = Object.fromEntries(diff.patches.map((p) => [p.path, p]));
+
+	// Found in a real session: the agent could see that it had created NOTES.md
+	// but not what was in it, which is the file most worth reviewing.
+	assert.ok(byPath["NOTES.md"], "the added file has a patch");
+	assert.equal(byPath["NOTES.md"].kind, "added");
+	assert.match(byPath["NOTES.md"].patch, /^--- \/dev\/null$/m);
+	assert.match(byPath["NOTES.md"].patch, /^\+# Scratch notes$/m);
+
+	assert.ok(byPath["old.js"], "the removed file has a patch");
+	assert.equal(byPath["old.js"].kind, "removed");
+	assert.match(byPath["old.js"].patch, /^\+\+\+ \/dev\/null$/m);
+	assert.match(byPath["old.js"].patch, /^-going away$/m);
+});
+
 test("diff can return file names without the patch text", async (t) => {
 	const root = tmpRoot(t);
 	write(root, "app.js", "a\n");

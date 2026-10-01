@@ -11,7 +11,7 @@ import { Journal, isRestorable, STATUS_WRITING } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
-import { unifiedDiff, renderUnified } from "./udiff.js";
+import { unifiedDiff, renderUnified, filePatch, hunkCounts } from "./udiff.js";
 import { humanBytes, journalDir, ensureDir, shortId, makeColour, colourEnabled } from "./util.js";
 
 const USAGE = `preimage - the undo layer for AI agents
@@ -334,39 +334,50 @@ async function cmdShow(args) {
 }
 
 /**
- * Build a unified diff for each modified text file.
+ * Build a unified diff for every changed file: modified, added and removed.
  *
- * Reads the stored bytes from the journal and the current bytes from disk, and
- * produces `diff -u` output for each. Files that cannot meaningfully be diffed as
- * text are reported with the reason rather than silently dropped, because a
- * missing patch reads as "no changes".
+ * Reads the stored bytes from the journal and the current bytes from disk.
+ * Added and removed files are included with a `/dev/null` side, because the
+ * contents of a file the agent just created are exactly what a reviewer wants
+ * to see. Files that cannot meaningfully be diffed as text are reported with the
+ * reason rather than silently dropped, because a missing patch reads as "no
+ * changes".
  */
-function buildHunks(journal, id, root, modified) {
+function buildHunks(journal, id, root, { modified, added, removed }) {
 	const out = [];
-	for (const item of modified) {
-		const rel = typeof item === "string" ? item : item.path;
-		const row = journal.getFile(id, rel);
-		const before = row ? journal.getBlob(row.sha) : null;
-		let after;
-		try {
-			after = fs.readFileSync(path.join(root, ...rel.split("/")));
-		} catch {
-			continue; // vanished between scan and here
+	const consider = (rel, kind) => {
+		let before = null;
+		let after = null;
+		if (kind !== "added") {
+			const row = journal.getFile(id, rel);
+			before = row ? journal.getBlob(row.sha) : null;
+			if (!before) return; // not in the checkpoint after all
 		}
-		if (!before) continue;
+		if (kind !== "removed") {
+			try {
+				after = fs.readFileSync(path.join(root, ...rel.split("/")));
+			} catch {
+				return; // vanished between scan and here
+			}
+		}
 
-		const { hunks, binary, reason } = unifiedDiff(before, after);
-		if (hunks.length === 0 && !reason) continue;
+		const { hunks, binary, reason, from, to } = filePatch(rel, before, after);
+		if (hunks.length === 0 && !reason) return;
 		out.push({
 			path: rel,
+			kind,
 			binary: Boolean(binary),
 			reason: reason ?? null,
-			added: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("+")).length, 0),
-			removed: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("-")).length, 0),
+			...hunkCounts(hunks),
 			hunks,
-			patch: renderUnified(`a/${rel}`, `b/${rel}`, hunks),
+			patch: renderUnified(from, to, hunks),
 		});
-	}
+	};
+
+	const pathOf = (item) => (typeof item === "string" ? item : item.path);
+	for (const item of added) consider(pathOf(item), "added");
+	for (const item of modified) consider(pathOf(item), "modified");
+	for (const item of removed) consider(pathOf(item), "removed");
 	return out;
 }
 
@@ -433,7 +444,7 @@ async function cmdDiff(args) {
 	//
 	// Built before the journal is closed, since the "before" bytes live there.
 	const wantHunks = args.flags["no-hunks"] !== true;
-	const hunks = wantHunks ? buildHunks(journal, id, root, plain.modified) : [];
+	const hunks = wantHunks ? buildHunks(journal, id, root, plain) : [];
 	journal.close();
 
 	emit(
