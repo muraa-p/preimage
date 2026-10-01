@@ -176,19 +176,41 @@ Every command takes `--json` for machine-readable output.
 
 ## Agent integration
 
-### MCP (works with anything that speaks MCP)
+### MCP — this is the path, and it is agent-agnostic
 
-```bash
-preimage mcp
-```
+`preimage mcp` speaks the Model Context Protocol over stdio, so it works with
+**every** MCP client, not just Claude. That includes OpenAI Codex and ChatGPT,
+Cursor, VS Code and Copilot, Windsurf, Gemini CLI, Zed, Cline, Roo Code, Kilo
+Code, Amazon Q and Claude Desktop. If your agent speaks MCP, preimage plugs in.
+
+Most clients take the same JSON:
 
 ```jsonc
-// claude_desktop_config.json / any MCP client config
 {
   "mcpServers": {
     "preimage": { "command": "preimage", "args": ["mcp"] }
   }
 }
+```
+
+Where each one wants it:
+
+| Agent | How to add it |
+| --- | --- |
+| **Claude Code** | `claude mcp add preimage -- preimage mcp` |
+| **OpenAI Codex** | `codex mcp add preimage -- preimage mcp`, or a `[mcp_servers.preimage]` table in `~/.codex/config.toml` |
+| **Gemini CLI** | `gemini mcp add preimage preimage mcp`, or `mcpServers` in `~/.gemini/settings.json` |
+| **Cursor** | `.cursor/mcp.json`, using the `mcpServers` key above |
+| **VS Code / Copilot** | `.vscode/mcp.json` — the key is `servers`, not `mcpServers` |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+| **Zed** | `.zed/settings.json`, under `context_servers` |
+| **Claude Desktop** | `claude_desktop_config.json` |
+
+Clients that launch the server in the wrong working directory will snapshot the
+wrong tree, so pass the path explicitly if that happens:
+
+```jsonc
+"preimage": { "command": "preimage", "args": ["mcp", "--root", "/path/to/project"] }
 ```
 
 Four tools:
@@ -217,6 +239,12 @@ Merge the printed fragment into `~/.claude/settings.json`. The hook never fails
 your session — if the checkpoint can't be taken, the edit proceeds anyway.
 
 Set `PREIMAGE_SESSION_WINDOW=0` to snapshot on literally every write.
+
+This is the one part that is **not** agent-agnostic: hooks are wired for Claude
+Code and OpenCode only. Every other agent is covered by MCP above — the
+difference is that a hook snapshots *without the model asking*, so on the other
+agents you either rely on the model calling `preimage_checkpoint` or wrap your
+own command chain.
 
 ## Safety design
 
