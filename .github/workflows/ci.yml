@@ -55,13 +55,20 @@ jobs:
       - name: Pack the tarball npm would publish
         run: npm pack --pack-destination "$RUNNER_TEMP"
 
+      # A scoped package produces muraa-p-preimage-0.1.0.tgz, so the tarball
+      # name is derived rather than assumed. A glob that no longer matches
+      # would otherwise fail much later, with a confusing error.
+      - name: Locate the tarball
+        id: tarball
+        run: echo "path=$(ls "$RUNNER_TEMP"/*.tgz)" >> "$GITHUB_OUTPUT"
+
       - name: Install the tarball into a clean project
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/consumer"
           cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null
-          npm install "$RUNNER_TEMP"/preimage-*.tgz --no-audit --no-fund
+          npm install "${{ steps.tarball.outputs.path }}" --no-audit --no-fund
           mkdir -p src
           printf 'const answer = 42;\n' > src/app.js
 
