@@ -152,6 +152,67 @@ test("list returns checkpoints with human-readable sizes", async (t) => {
 	assert.ok(!Number.isNaN(Date.parse(list.checkpoints[0].takenAt)));
 });
 
+test("diff includes a unified patch so the agent can see what it changed", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "app.js", "const port = 3000;\nconst host = 'localhost';\n");
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+	write(root, "app.js", "const port = 9999;\nconst host = 'localhost';\n");
+
+	const diff = payload(await mcp.request("tools/call", { name: "preimage_diff", arguments: {} }));
+	// Without this the agent is told "app.js changed" and has to go and read it,
+	// which is the exact work preimage is supposed to remove.
+	assert.equal(diff.patches.length, 1);
+	assert.equal(diff.patches[0].path, "app.js");
+	assert.equal(diff.patches[0].added, 1);
+	assert.equal(diff.patches[0].removed, 1);
+	assert.match(diff.patches[0].patch, /-const port = 3000;/);
+	assert.match(diff.patches[0].patch, /\+const port = 9999;/);
+	assert.match(diff.patches[0].patch, /^@@ /m);
+});
+
+test("diff can return file names without the patch text", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "app.js", "a\n");
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+	write(root, "app.js", "b\n");
+
+	const diff = payload(
+		await mcp.request("tools/call", {
+			name: "preimage_diff",
+			arguments: { includePatches: false },
+		}),
+	);
+	assert.deepEqual(diff.patches, []);
+	assert.deepEqual(diff.files.modified, ["app.js"], "the summary is still there");
+});
+
+test("a huge refactor is truncated with an explicit note, not silently", async (t) => {
+	const root = tmpRoot(t);
+	// 40 files, each changing a lot: more than the patch budget allows.
+	for (let i = 0; i < 40; i++) {
+		write(root, `f${i}.js`, `${Array.from({ length: 200 }, (_, n) => `a${n}`).join("\n")}\n`);
+	}
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+	for (let i = 0; i < 40; i++) {
+		write(root, `f${i}.js`, `${Array.from({ length: 200 }, (_, n) => `b${n}`).join("\n")}\n`);
+	}
+
+	const diff = payload(await mcp.request("tools/call", { name: "preimage_diff", arguments: {} }));
+	assert.equal(diff.files.modified.length, 40);
+	const note = diff.patches.find((p) => p.omitted !== undefined);
+	// A caller that cannot see the rest of the changes must be told, or it will
+	// conclude the other files did not change.
+	assert.ok(note, "the omitted files are reported");
+	assert.match(note.reason, /not shown/);
+	assert.match(note.reason, /preimage_diff|preimage_show/);
+});
+
 test("list tells the agent whether a checkpoint is safe to restore from", async (t) => {
 	const root = tmpRoot(t);
 	write(root, "a.txt", "hello");

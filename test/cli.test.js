@@ -165,11 +165,83 @@ test("restore marks the checkpoint as restored", async (t) => {
 	assert.equal(out.checkpoint.status, "restored");
 });
 
+test("diff shows a unified patch, and --no-hunks suppresses it", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "app.js", "const port = 3000;\nconst host = 'localhost';\n");
+	await run(["checkpoint", "--root", root]);
+	write(root, "app.js", "const port = 9999;\nconst host = 'localhost';\n");
+
+	const { stdout } = await run(["diff", "--root", root]);
+	// Knowing the file changed is not the same as knowing what changed in it.
+	assert.match(stdout, /--- a\/app\.js/);
+	assert.match(stdout, /\+\+\+ b\/app\.js/);
+	assert.match(stdout, /^@@ -\d+,\d+ \+\d+,\d+ @@/m);
+	assert.match(stdout, /-const port = 3000;/);
+	assert.match(stdout, /\+const port = 9999;/);
+	// The summary still leads, so the shape of the change is readable first.
+	assert.ok(stdout.indexOf("1 modified") < stdout.indexOf("--- a/app.js"));
+
+	const { stdout: bare } = await run(["diff", "--root", root, "--no-hunks"]);
+	assert.match(bare, /1 modified/);
+	assert.doesNotMatch(bare, /--- a\/app\.js/);
+});
+
+test("diff --json carries the patch and its line counts", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "app.js", "one\ntwo\n");
+	await run(["checkpoint", "--root", root]);
+	write(root, "app.js", "one\nTWO\nthree\n");
+
+	const { stdout } = await run(["diff", "--root", root, "--json"]);
+	const v = JSON.parse(stdout);
+	assert.equal(v.patches.length, 1);
+	assert.equal(v.patches[0].path, "app.js");
+	assert.equal(v.patches[0].added, 2);
+	assert.equal(v.patches[0].removed, 1);
+	assert.equal(v.patches[0].binary, false);
+});
+
+test("a binary file is reported as such rather than as an empty patch", async (t) => {
+	const root = tmpRoot(t);
+	fs.writeFileSync(path.join(root, "logo.png"), Buffer.from([0x89, 0x50, 0x00, 0x01]));
+	await run(["checkpoint", "--root", root]);
+	fs.writeFileSync(path.join(root, "logo.png"), Buffer.from([0x89, 0x50, 0x00, 0x02]));
+
+	const { stdout } = await run(["diff", "--root", root, "--json"]);
+	const v = JSON.parse(stdout);
+	const entry = v.patches.find((p) => p.path === "logo.png");
+	assert.ok(entry, "the changed binary file is still listed");
+	assert.equal(entry.binary, true);
+	assert.equal(entry.reason, "binary file");
+});
+
 test("commands fail cleanly without a journal", async (t) => {
 	const root = tmpRoot(t);
 	const { stderr } = await run(["list", "--root", root], { expectFail: true });
 	assert.match(stderr, /no journal/);
-	assert.match(stderr, /preimage init/);
+	assert.match(stderr, /preimage checkpoint/);
+});
+
+test("running from a subdirectory points at the journal one level up", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "src/app.js", "one");
+	await run(["checkpoint", "--root", root]);
+	write(root, "src/app.js", "two");
+
+	// Most work happens in a subdirectory, and "no journal" there is a dead end:
+	// the journal exists, just not where you are standing.
+	const sub = path.join(root, "src");
+	const { stderr } = await run(["list", "--root", sub], { expectFail: true });
+	assert.match(stderr, /no journal/);
+	assert.match(stderr, /journal one level up/);
+	assert.match(stderr, new RegExp(`--root ${root.replace(/\\/g, "\\\\")}`));
+
+	// And it must not silently act on the parent instead. Restore has to be
+	// pointed at the right project explicitly.
+	await run(["checkpoint", "--root", sub]);
+	const { stdout } = await run(["list", "--root", sub, "--json"]);
+	const listed = JSON.parse(stdout);
+	assert.equal(listed.checkpoints.length, 1, "the subdirectory gets its own journal");
 });
 
 test("checkpoint works without init, creating the journal", async (t) => {

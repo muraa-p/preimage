@@ -24,7 +24,7 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
     "test:watch": "node --test --watch \"test/**/*.test.js\"",
-    "check": "node --check bin/preimage.js && node --check src/index.js && node --check src/cli.js && node --check src/mcp.js && node --check src/journal.js && node --check src/capture.js && node --check src/dbadapter.js && node --check src/restore.js && node --check src/util.js"
+    "check": "node --check bin/preimage.js && node --check src/index.js && node --check src/cli.js && node --check src/mcp.js && node --check src/journal.js && node --check src/capture.js && node --check src/dbadapter.js && node --check src/restore.js && node --check src/udiff.js && node --check src/util.js"
   },
   "keywords": [
     "ai-agent",

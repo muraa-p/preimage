@@ -9,11 +9,13 @@
 // every dependency there is attack surface.
 
 import fs from "node:fs";
+import path from "node:path";
 import { createRequire } from "node:module";
 import { Journal, isRestorable } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
+import { unifiedDiff, renderUnified } from "./udiff.js";
 import { journalDir, ensureDir, humanBytes, shortId } from "./util.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -52,11 +54,16 @@ const TOOLS = [
 	{
 		name: "preimage_diff",
 		description:
-			"Show what changed since a checkpoint: files added, modified, deleted, and SQLite rows inserted, updated or removed. Read-only.",
+			"Show what changed since a checkpoint: files added, modified, deleted, a unified diff for each modified text file, and SQLite rows inserted, updated or removed. Read-only. Call this after making changes to see exactly what you did before deciding whether to keep it.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				checkpointId: { type: "number", description: "Checkpoint id. Defaults to the most recent." },
+				includePatches: {
+					type: "boolean",
+					description:
+						"Set false to get only file names and row counts, without the line-level diffs. Use this when you only need to know which files changed.",
+				},
 			},
 			required: [],
 		},
@@ -118,6 +125,69 @@ function assertRestorable(cp) {
 		);
 	}
 	return cp;
+}
+
+/** How much patch text one MCP diff may return. */
+const PATCH_FILE_LIMIT = 20;
+const PATCH_BYTE_LIMIT = 60_000;
+
+/**
+ * Unified diffs for modified text files, with a hard byte budget.
+ *
+ * The budget is the point. An agent asking "what did I change" is the single most
+ * useful question preimage can answer, but a diff of a large refactor is
+ * megabytes, and handing that to a model with a finite context window trades the
+ * conversation for something the agent could have re-read selectively. So the
+ * budget is spent largest-diff-first on the files that changed most, and what was
+ * left out is reported rather than silently dropped.
+ */
+function buildPatches(journal, id, root, modified, { maxFiles, maxBytes }) {
+	const candidates = [];
+	for (const item of modified) {
+		const rel = typeof item === "string" ? item : item.path;
+		const row = journal.getFile(id, rel);
+		if (!row) continue;
+		const before = journal.getBlob(row.sha);
+		if (!before) continue;
+		let after;
+		try {
+			after = fs.readFileSync(path.join(root, ...rel.split("/")));
+		} catch {
+			continue;
+		}
+		const { hunks, binary, reason } = unifiedDiff(before, after);
+		if (hunks.length === 0 && !reason) continue;
+		candidates.push({
+			path: rel,
+			binary: Boolean(binary),
+			reason: reason ?? null,
+			added: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("+")).length, 0),
+			removed: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("-")).length, 0),
+			patch: renderUnified(`a/${rel}`, `b/${rel}`, hunks),
+		});
+	}
+
+	// Biggest change first, so a truncated result still covers what matters.
+	candidates.sort((a, b) => b.patch.length - a.patch.length);
+	const kept = [];
+	let used = 0;
+	for (const c of candidates) {
+		if (kept.length >= maxFiles) break;
+		if (used + c.patch.length > maxBytes) continue;
+		kept.push(c);
+		used += c.patch.length;
+	}
+	kept.sort((a, b) => a.path.localeCompare(b.path));
+
+	const omitted = candidates.length - kept.length;
+	if (omitted > 0) {
+		kept.push({
+			path: null,
+			omitted: omitted,
+			reason: `${omitted} more changed file(s) not shown: the patch budget was reached. Call preimage_diff again, or preimage_show, for a specific file.`,
+		});
+	}
+	return kept;
 }
 
 function handleTool(name, args, root) {
@@ -206,6 +276,19 @@ function handleTool(name, args, root) {
 				const cp = assertRestorable(resolveCheckpoint(journal, args?.checkpointId));
 				const files = diffTree(journal, cp.id, root);
 				const tables = journal.listDbTables(cp.id).length > 0 ? diffTables(journal, cp.id, root) : null;
+
+				// Line-level patches, so the agent can see what it changed without
+				// re-reading each file. Bounded, because a tool result goes into a
+				// context window that the rest of the task also needs. A whole
+				// tree of patches would crowd out the conversation.
+				const patches = args?.includePatches === false ? [] : buildPatches(
+					journal,
+					cp.id,
+					root,
+					files.modified,
+					{ maxFiles: PATCH_FILE_LIMIT, maxBytes: PATCH_BYTE_LIMIT },
+				);
+
 				return textResult({
 					ok: true,
 					checkpointId: cp.id,
@@ -219,6 +302,7 @@ function handleTool(name, args, root) {
 						unchanged: files.unchanged.length,
 						unreadable: files.unreadable,
 					},
+					patches,
 					tables,
 				});
 			}

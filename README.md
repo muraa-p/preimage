@@ -156,10 +156,45 @@ preimage diff 3                        # ...since a specific one
 preimage restore 3                     # put it back
 ```
 
+`diff` doesn't just name the files. It prints a real unified diff, byte for byte
+what `git diff` would print, so you can read the damage instead of opening each
+file to find it:
+
+```
+$ preimage diff
+diff against checkpoint 0001
+  1 added
+  1 modified
+  0 deleted
+  2 unchanged
+    app.js
+    SCRATCH.js
+
+--- a/app.js
++++ b/app.js
+@@ -1,4 +1,8 @@
+-export function greet(name) {
+-  return `hello ${name}`;
++export function greet(name, greeting = 'hi') {
++  const msg = `${greeting} ${name}`;
++  console.log(msg);
++  return msg;
++}
++
++export function farewell(name) {
++  return 'bye';
+ }
+```
+
+`--no-hunks` gives you just the file list. Binary files and files too large to
+diff line-by-line are reported with the reason rather than skipped silently.
+
 `diff` and `show` default to the most recent checkpoint. `restore` always wants
 an explicit id, because guessing wrong there is expensive.
 
-Every command takes `--json` for machine-readable output.
+Every command takes `--json` for machine-readable output. `diff --json` puts the
+patches in a `patches` array, each with `path`, `added`, `removed` and the
+`diff -u` text.
 
 ### Options that matter
 
@@ -168,6 +203,7 @@ Every command takes `--json` for machine-readable output.
 --db <path>        Capture a SQLite database too (repeatable)
 --table <name>     Limit to specific tables (repeatable)
 --max-bytes <n>    Skip files larger than this (default 10 MB)
+--no-hunks         diff: file names only, no line-level patches
 --dry-run          Report what restore would do, change nothing
 --purge            Also delete files created after the checkpoint
 --remove-extra     Also delete rows created after the checkpoint
@@ -216,13 +252,19 @@ wrong tree, so pass the path explicitly if that happens:
 Four tools:
 
 - `preimage_checkpoint` — snapshot before risky work
-- `preimage_diff` — what changed since a checkpoint
+- `preimage_diff` — what changed since a checkpoint, with a unified diff per file
 - `preimage_restore` — roll back
 - `preimage_list` — what's recoverable
 
 `preimage_restore` **requires an explicit `confirm: true`**, and refuses
 otherwise. An agent mid-task should not be able to undo your working state by
 accident; it has to ask.
+
+`preimage_diff` returns the patches, so the agent sees the lines it changed
+rather than being told a file changed and having to go read it. The patch text is
+capped at a budget; if a refactor exceeds it, the response says how many files
+were left out rather than letting the agent conclude they were untouched. Pass
+`includePatches: false` when you only want the file names.
 
 ### Hooks (automatic)
 
@@ -324,7 +366,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 110 tests, node:test
+npm test          # 132 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story

@@ -11,6 +11,7 @@ import { Journal, isRestorable, STATUS_WRITING } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
+import { unifiedDiff, renderUnified } from "./udiff.js";
 import { humanBytes, journalDir, ensureDir, shortId } from "./util.js";
 
 const USAGE = `preimage - the undo layer for AI agents
@@ -35,6 +36,7 @@ COMMON OPTIONS
   --db <path>                   Include a SQLite database (repeatable)
   --table <name>                Limit to specific tables (repeatable)
   --max-bytes <n>               Skip files larger than this (default ${DEFAULT_MAX_FILE_BYTES})
+  --no-hunks                    diff: file names only, no line-level patches
   --dry-run                     Show what restore would do, change nothing
   --purge                       Also delete files created after the checkpoint
   --remove-extra                Also delete rows added after the checkpoint
@@ -42,8 +44,9 @@ COMMON OPTIONS
 
 EXAMPLES
   preimage checkpoint "before refactor"
-  preimage diff                # latest checkpoint
+  preimage diff                # latest checkpoint, with a unified diff
   preimage diff 0003
+  preimage diff --no-hunks     # just the file list
   preimage restore 0003 --purge
   preimage checkpoint --db ./app.db --table users --table orders
 `;
@@ -124,12 +127,34 @@ function resolveRoot(flags) {
 	return path.resolve(flags.root ?? process.cwd());
 }
 
+/**
+ * The nearest ancestor directory (including `root` itself) that holds a journal.
+ *
+ * A journal belongs to a project root, and plenty of work happens in a
+ * subdirectory. Walking up is only used to produce a better error message, never
+ * to silently change which project a command acts on -- silently retargeting
+ * `restore` at a parent directory would be exactly the kind of surprise this
+ * tool exists to prevent.
+ */
+function nearestJournalRoot(start) {
+	let dir = path.resolve(start);
+	for (;;) {
+		if (fs.existsSync(journalDir(dir))) return dir;
+		const up = path.dirname(dir);
+		if (up === dir) return null;
+		dir = up;
+	}
+}
+
 function requireJournal(root) {
 	const dir = journalDir(root);
 	if (!fs.existsSync(dir)) {
-		throw new Error(
-			`no journal for ${root}\nRun \`preimage init\` first, or pass --root <dir>.`,
-		);
+		const parent = nearestJournalRoot(root);
+		const hint =
+			parent && parent !== root
+				? `\nThere is a journal one level up at ${parent}. Pass --root ${parent} to use it.`
+				: "\nRun `preimage checkpoint` in the project root first, or pass --root <dir>.";
+		throw new Error(`no journal for ${root}${hint}`);
 	}
 	return Journal.open(root);
 }
@@ -308,6 +333,43 @@ async function cmdShow(args) {
 	);
 }
 
+/**
+ * Build a unified diff for each modified text file.
+ *
+ * Reads the stored bytes from the journal and the current bytes from disk, and
+ * produces `diff -u` output for each. Files that cannot meaningfully be diffed as
+ * text are reported with the reason rather than silently dropped, because a
+ * missing patch reads as "no changes".
+ */
+function buildHunks(journal, id, root, modified) {
+	const out = [];
+	for (const item of modified) {
+		const rel = typeof item === "string" ? item : item.path;
+		const row = journal.getFile(id, rel);
+		const before = row ? journal.getBlob(row.sha) : null;
+		let after;
+		try {
+			after = fs.readFileSync(path.join(root, ...rel.split("/")));
+		} catch {
+			continue; // vanished between scan and here
+		}
+		if (!before) continue;
+
+		const { hunks, binary, reason } = unifiedDiff(before, after);
+		if (hunks.length === 0 && !reason) continue;
+		out.push({
+			path: rel,
+			binary: Boolean(binary),
+			reason: reason ?? null,
+			added: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("+")).length, 0),
+			removed: hunks.reduce((n, h) => n + h.body.filter((l) => l.startsWith("-")).length, 0),
+			hunks,
+			patch: renderUnified(`a/${rel}`, `b/${rel}`, hunks),
+		});
+	}
+	return out;
+}
+
 async function cmdDiff(args) {
 	const root = resolveRoot(args.flags);
 	const journal = requireJournal(root);
@@ -332,7 +394,6 @@ async function cmdDiff(args) {
 	// in the file section too would count the same change twice and read as if
 	// the file would be rewritten byte-for-byte on restore, which it is not.
 	const tableOwned = new Set(journal.listDbTables(id).map((t) => t.db_path));
-	journal.close();
 	const pathOf = (item) => (typeof item === "string" ? item : item.path);
 	const isPlainFile = (item) => !tableOwned.has(pathOf(item));
 	const plain = {
@@ -342,6 +403,16 @@ async function cmdDiff(args) {
 	};
 
 	const changed = files.added.length + files.modified.length + files.removed.length;
+
+	// Line-level hunks for the modified text files. Knowing *which* file an
+	// agent edited does not tell you what it did to it, and reading every file
+	// to find out is exactly the work this tool exists to remove.
+	//
+	// Built before the journal is closed, since the "before" bytes live there.
+	const wantHunks = args.flags["no-hunks"] !== true;
+	const hunks = wantHunks ? buildHunks(journal, id, root, plain.modified) : [];
+	journal.close();
+
 	emit(
 		args,
 		() => {
@@ -369,6 +440,13 @@ async function cmdDiff(args) {
 					process.stdout.write(`    ${pathOf(item)}\n`);
 				}
 			}
+			// The hunks, in `diff -u` form so they read exactly like git's.
+			for (const entry of hunks) {
+				process.stdout.write(`\n${entry.patch}\n`);
+			}
+			if (hunks.length === 0 && plain.modified.length > 0 && wantHunks) {
+				process.stdout.write("\n  (no line-level diff: nothing readable to show)\n");
+			}
 		},
 		() => ({
 			ok: true,
@@ -381,6 +459,7 @@ async function cmdDiff(args) {
 				unchanged: files.unchanged,
 				unreadable: files.unreadable,
 			},
+			patches: hunks,
 			// Reported separately so a caller can still see that a database file
 			// changed on disk even though restore handles it table by table.
 			tableOwnedDatabases: [...tableOwned],
