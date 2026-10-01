@@ -137,19 +137,28 @@ function testSummary(cwd) {
 	// changes behaviour and reports zero tests, so the demo claimed "no tests"
 	// when check/readme.test.js exercised it. Clearing the variable makes the
 	// nested run behave like a normal one.
+	//
+	// The reporter is also pinned. Node 22 defaults to TAP when stdout is not a
+	// terminal and spec when it is, so the totals arrive as "# pass 2" on one
+	// version and "ℹ pass 2" on another. Pinning it makes the parse below
+	// version-independent -- which it was not, and CI on Node 22 caught that.
 	const env = { ...process.env };
 	delete env.NODE_TEST_CONTEXT;
 	delete env.NODE_TEST_WORKER_ID;
 	let out;
 	try {
-		out = execFileSync(process.execPath, ["--test"], { cwd, encoding: "utf8", env });
+		out = execFileSync(
+			process.execPath,
+			["--test", "--test-reporter=spec"],
+			{ cwd, encoding: "utf8", env },
+		);
 	} catch (e) {
 		out = `${e.stdout ?? ""}`;
 	}
-	const pass = Number(/^ℹ pass (\d+)$/m.exec(out)?.[1] ?? 0);
-	const fail = Number(/^ℹ fail (\d+)$/m.exec(out)?.[1] ?? 0);
+	const pass = Number(/^(?:ℹ|#) pass (\d+)$/m.exec(out)?.[1] ?? 0);
+	const fail = Number(/^(?:ℹ|#) fail (\d+)$/m.exec(out)?.[1] ?? 0);
 	if (fail === 0 && pass > 0) return c(GREEN, `✔ ${pass} passing, 0 failing`);
-	if (fail === 0) return c(DIM, "no tests");
+	if (fail === 0) return c(DIM, "no tests found");
 	return c(RED, `✖ ${fail} failing, ${pass} passing`);
 }
 
