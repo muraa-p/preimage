@@ -136,6 +136,107 @@ test("list returns checkpoints with human-readable sizes", async (t) => {
 	assert.ok(!Number.isNaN(Date.parse(list.checkpoints[0].takenAt)));
 });
 
+test("list tells the agent whether a checkpoint is safe to restore from", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "hello");
+
+	const mcp = harness(root);
+	const cp = payload(await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} }));
+
+	// A row that never finished being written, as a crash mid-checkpoint leaves.
+	const { Journal } = await import(new URL("../src/journal.js", import.meta.url).href);
+	const j = Journal.open(root);
+	j.createCheckpoint({ root, label: "crashed mid-write" });
+	j.close();
+
+	const list = payload(await mcp.request("tools/call", { name: "preimage_list", arguments: {} }));
+	const byId = Object.fromEntries(list.checkpoints.map((c) => [c.id, c]));
+	assert.equal(byId[cp.checkpointId].restorable, true);
+	// Without this the agent cannot tell "saved nothing" from "unusable", and
+	// will happily restore from the latter and get `ok: true` for it.
+	assert.equal(byId[cp.checkpointId + 1].restorable, false);
+});
+
+test("restore refuses an unfinished checkpoint instead of reporting a fake success", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "original");
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+
+	const { Journal } = await import(new URL("../src/journal.js", import.meta.url).href);
+	const j = Journal.open(root);
+	const ghost = j.createCheckpoint({ root, label: "crashed mid-write" });
+	j.close();
+	write(root, "a.txt", "agent wrecked this");
+
+	const reply = await mcp.request("tools/call", {
+		name: "preimage_restore",
+		arguments: { checkpointId: ghost, confirm: true },
+	});
+	assert.equal(reply.result.isError, true);
+	assert.match(reply.result.content[0].text, /incomplete/);
+	// The file the agent wrecked is untouched, and it is told why.
+	assert.equal(fs.readFileSync(path.join(root, "a.txt"), "utf8"), "agent wrecked this");
+});
+
+test("diff refuses an unfinished checkpoint rather than reporting every file as added", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "original");
+
+	const mcp = harness(root);
+	await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: {} });
+
+	const { Journal } = await import(new URL("../src/journal.js", import.meta.url).href);
+	const j = Journal.open(root);
+	const ghost = j.createCheckpoint({ root, label: "crashed mid-write" });
+	j.close();
+
+	const reply = await mcp.request("tools/call", {
+		name: "preimage_diff",
+		arguments: { checkpointId: ghost },
+	});
+	assert.equal(reply.result.isError, true);
+	assert.match(reply.result.content[0].text, /incomplete/);
+});
+
+test("diff defaults to the most recent finished checkpoint", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+
+	const mcp = harness(root);
+	const first = payload(
+		await mcp.request("tools/call", { name: "preimage_checkpoint", arguments: { label: "first" } }),
+	);
+	const { Journal } = await import(new URL("../src/journal.js", import.meta.url).href);
+	const j = Journal.open(root);
+	j.createCheckpoint({ root, label: "later but unfinished" });
+	j.close();
+	write(root, "a.txt", "two");
+
+	const diff = payload(await mcp.request("tools/call", { name: "preimage_diff", arguments: {} }));
+	assert.equal(diff.checkpointId, first.checkpointId);
+	assert.deepEqual(diff.files.modified, ["a.txt"]);
+});
+
+test("a checkpoint whose database capture fails still keeps its file snapshot", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "kept");
+
+	const mcp = harness(root);
+	const cp = payload(
+		await mcp.request("tools/call", {
+			name: "preimage_checkpoint",
+			arguments: { databases: ["does-not-exist.db"] },
+		}),
+	);
+	assert.equal(cp.ok, true);
+	assert.equal(cp.files, 1, "the file snapshot survives an unreachable database");
+	assert.equal(cp.databases[0].error !== undefined, true, "and the database failure is reported");
+	const list = payload(await mcp.request("tools/call", { name: "preimage_list", arguments: {} }));
+	assert.equal(list.checkpoints[0].restorable, true);
+});
+
 test("restore requires explicit confirmation", async (t) => {
 	const root = tmpRoot(t);
 	write(root, "a.txt", "original");

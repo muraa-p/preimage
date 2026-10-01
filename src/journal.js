@@ -103,11 +103,43 @@ function migrate(db) {
 	}
 }
 
+/**
+ * Checkpoint lifecycle. A checkpoint is created as `writing` and only becomes
+ * `open` once every file and row has actually been persisted.
+ *
+ * The `writing` state is not decoration. If the process dies partway through a
+ * checkpoint, the row would otherwise survive with no content behind it, and
+ * every later `diff` would default to it while every `restore` would report
+ * success having changed nothing. For a tool whose entire promise is "this is
+ * reversible", a restore that silently does nothing is the worst failure
+ * available, so an unfinished checkpoint is refused rather than honoured.
+ *
+ * `open` is also what preimage journals written before this state existed
+ * carry, so they keep restoring exactly as they did.
+ */
+export const STATUS_WRITING = "writing";
+export const STATUS_OPEN = "open";
+export const STATUS_RESTORED = "restored";
+
+/** True when a checkpoint is complete enough to restore from. */
+export function isRestorable(cp) {
+	return Boolean(cp) && cp.status !== STATUS_WRITING;
+}
+
+/** How long a writer waits for another's lock before giving up. */
+const BUSY_TIMEOUT_MS = 10_000;
+
 export class Journal {
 	constructor(dbPath) {
 		ensureDir(journalDir(dbPath.replace(/[/\\]journal\.db$/, "")));
 		this.path = dbPath;
 		this.db = new DatabaseSync(dbPath);
+		// WAL lets readers run during a write, but writers still serialise, and
+		// SQLite's default busy timeout is 0 -- so a second process racing the
+		// first gets SQLITE_BUSY immediately instead of waiting its turn.
+		// Agents run work in parallel, and `preimage checkpoint` is exactly the
+		// kind of thing several of them will reach for at once.
+		this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 		this.db.exec(SCHEMA);
 		migrate(this.db);
 	}
@@ -124,23 +156,50 @@ export class Journal {
 		}
 	}
 
+	/**
+	 * Run `fn` as a single write transaction, rolling back if it throws.
+	 *
+	 * `BEGIN IMMEDIATE` takes the write lock up front rather than on the first
+	 * write, so concurrent writers queue on the busy timeout rather than
+	 * failing half way through. Everything in a checkpoint -- the row, the
+	 * file entries, the blobs, the table rows -- is written inside one of
+	 * these, so a checkpoint either exists complete or not at all.
+	 */
+	transaction(fn) {
+		this.db.exec("BEGIN IMMEDIATE");
+		let out;
+		try {
+			out = fn();
+		} catch (err) {
+			try {
+				this.db.exec("ROLLBACK");
+			} catch {
+				// already rolled back, or the connection is unusable; the
+				// original error is the one worth surfacing
+			}
+			throw err;
+		}
+		this.db.exec("COMMIT");
+		return out;
+	}
+
 	// --- checkpoints -------------------------------------------------------
 
 	createCheckpoint({ root, label = null, source = "cli" }) {
 		const info = this.db
 			.prepare(
-				"INSERT INTO checkpoints (created_at, root, label, source) VALUES (?, ?, ?, ?)",
+				"INSERT INTO checkpoints (created_at, root, label, source, status) VALUES (?, ?, ?, ?, ?)",
 			)
-			.run(Date.now(), root, label, source);
+			.run(Date.now(), root, label, source, STATUS_WRITING);
 		return Number(info.lastInsertRowid);
 	}
 
 	finaliseCheckpoint(id, { fileCount = 0, totalBytes = 0, dbCount = 0 }) {
 		this.db
 			.prepare(
-				"UPDATE checkpoints SET file_count = ?, total_bytes = ?, db_count = ? WHERE id = ?",
+				"UPDATE checkpoints SET file_count = ?, total_bytes = ?, db_count = ?, status = ? WHERE id = ?",
 			)
-			.run(fileCount, totalBytes, dbCount, id);
+			.run(fileCount, totalBytes, dbCount, STATUS_OPEN, id);
 	}
 
 	getCheckpoint(id) {
@@ -157,9 +216,18 @@ export class Journal {
 			.all(norm(limit));
 	}
 
+	/**
+	 * The newest checkpoint that finished being written. An unfinished one is
+	 * skipped rather than returned, so a bare `preimage diff` never defaults to
+	 * a checkpoint with nothing behind it.
+	 */
 	latestCheckpoint() {
 		return (
-			this.db.prepare("SELECT * FROM checkpoints ORDER BY id DESC LIMIT 1").get() ?? null
+			this.db
+				.prepare(
+					"SELECT * FROM checkpoints WHERE status != ? ORDER BY id DESC LIMIT 1",
+				)
+				.get(STATUS_WRITING) ?? null
 		);
 	}
 

@@ -232,6 +232,13 @@ This tool deletes things, so the defaults are conservative.
   leaves them completely alone rather than overwriting them with nothing.
 - **Writes are atomic.** Every restore goes through a temp file and a rename,
   so a crash mid-restore cannot leave a half-written file.
+- **A checkpoint is all-or-nothing.** The row, the file entries and the database
+  rows are written in one transaction. A checkpoint that dies partway through
+  leaves nothing behind rather than an empty row that looks restorable. Anything
+  unfinished is refused outright, because a restore that reports success without
+  restoring anything is the one failure this tool cannot have.
+- **Parallel agents do not collide.** Several `preimage checkpoint` processes can
+  run at once; they queue on the journal rather than failing on a lock.
 - **Path traversal is blocked.** A tampered journal record cannot write outside
   the project root.
 - **Table scope is explicit.** preimage never snapshots an entire database
@@ -289,7 +296,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 91 tests, node:test
+npm test          # 107 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story

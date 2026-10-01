@@ -9,7 +9,7 @@
 // every dependency there is attack surface.
 
 import fs from "node:fs";
-import { Journal } from "./journal.js";
+import { Journal, isRestorable } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
@@ -96,6 +96,20 @@ function resolveCheckpoint(journal, arg) {
 	return cp;
 }
 
+/**
+ * An unfinished checkpoint must never be handed back to a caller as if it were
+ * usable. An agent that restores from one gets `ok: true` having changed
+ * nothing, and then goes on to delete its own backups -- so refuse instead.
+ */
+function assertRestorable(cp) {
+	if (!isRestorable(cp)) {
+		throw new Error(
+			`checkpoint ${cp.id} is incomplete: it was never finished being written, so there is nothing in it to restore`,
+		);
+	}
+	return cp;
+}
+
 function handleTool(name, args, root) {
 	const dir = journalDir(root);
 	if (!fs.existsSync(dir)) {
@@ -109,30 +123,43 @@ function handleTool(name, args, root) {
 	try {
 		switch (name) {
 			case "preimage_checkpoint": {
-				const id = journal.createCheckpoint({
-					root,
-					label: args?.label ?? null,
-					source: args?.source ?? "mcp",
-				});
+				// Scan before taking the write lock: reading the tree needs no
+				// lock and is the slow part.
 				const tree = scanTree(root, { maxFileBytes: DEFAULT_MAX_FILE_BYTES });
-				const { fileCount, totalBytes } = persistTree(journal, id, tree);
 
-				let rowCount = 0;
-				const captured = [];
-				for (const dbPath of args?.databases ?? []) {
-					try {
-						const r = captureTables(journal, id, {
-							root,
-							dbPath,
-							tables: args?.tables ?? [],
-						});
-						rowCount += r.rowCount;
-						captured.push(r);
-					} catch (err) {
-						captured.push({ dbPath, error: err.message });
+				// One transaction for the whole checkpoint, so a failure rolls
+				// the row back instead of leaving an empty one an agent would
+				// later treat as a valid undo point.
+				const created = journal.transaction(() => {
+					const id = journal.createCheckpoint({
+						root,
+						label: args?.label ?? null,
+						source: args?.source ?? "mcp",
+					});
+					const { fileCount, totalBytes } = persistTree(journal, id, tree);
+
+					let rowCount = 0;
+					const captured = [];
+					for (const dbPath of args?.databases ?? []) {
+						try {
+							const r = captureTables(journal, id, {
+								root,
+								dbPath,
+								tables: args?.tables ?? [],
+							});
+							rowCount += r.rowCount;
+							captured.push(r);
+						} catch (err) {
+							// One unreachable database should not cost the
+							// caller the file checkpoint it did manage to take.
+							captured.push({ dbPath, error: err.message });
+						}
 					}
-				}
-				journal.finaliseCheckpoint(id, { fileCount, totalBytes, dbCount: rowCount });
+					journal.finaliseCheckpoint(id, { fileCount, totalBytes, dbCount: rowCount });
+					return { id, fileCount, totalBytes, rowCount, captured };
+				});
+
+				const { id, fileCount, totalBytes, rowCount, captured } = created;
 				return textResult({
 					ok: true,
 					checkpointId: id,
@@ -153,6 +180,10 @@ function handleTool(name, args, root) {
 						id: r.id,
 						label: r.label,
 						status: r.status,
+						// An agent needs to be able to tell "this checkpoint
+						// saved nothing" from "this checkpoint is unusable",
+						// because only one of them is safe to restore into.
+						restorable: isRestorable(r),
 						files: r.file_count,
 						bytesHuman: humanBytes(r.total_bytes),
 						rows: r.db_count,
@@ -162,7 +193,7 @@ function handleTool(name, args, root) {
 			}
 
 			case "preimage_diff": {
-				const cp = resolveCheckpoint(journal, args?.checkpointId);
+				const cp = assertRestorable(resolveCheckpoint(journal, args?.checkpointId));
 				const files = diffTree(journal, cp.id, root);
 				const tables = journal.listDbTables(cp.id).length > 0 ? diffTables(journal, cp.id, root) : null;
 				return textResult({
@@ -188,7 +219,7 @@ function handleTool(name, args, root) {
 						"refusing to restore: confirm must be true. Ask the user before rolling back.",
 					);
 				}
-				const cp = resolveCheckpoint(journal, args?.checkpointId);
+				const cp = assertRestorable(resolveCheckpoint(journal, args?.checkpointId));
 				const dryRun = args?.dryRun === true;
 				const fileResult = restoreFiles(journal, cp.id, root, {
 					purge: args?.purge === true,

@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Journal } from "./journal.js";
+import { Journal, isRestorable, STATUS_WRITING } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
@@ -48,9 +48,22 @@ EXAMPLES
   preimage checkpoint --db ./app.db --table users --table orders
 `;
 
+/**
+ * Flags that may legitimately be repeated, and so collect into an array.
+ * Everything else is scalar: passing it twice takes the last value, which is
+ * what every other CLI does. Without this, `--root a --root b` turned the value
+ * into an array and failed deep inside path.resolve with a Node internals
+ * message about `paths[0]`, telling the user nothing about their own command.
+ */
+const REPEATABLE_FLAGS = new Set(["db", "table"]);
+
 function parseArgs(argv) {
 	const out = { _: [], flags: {} };
 	const setFlag = (name, value) => {
+		if (!REPEATABLE_FLAGS.has(name)) {
+			out.flags[name] = value;
+			return;
+		}
 		if (Object.hasOwn(out.flags, name)) {
 			const prev = out.flags[name];
 			out.flags[name] = Array.isArray(prev) ? [...prev, value] : [prev, value];
@@ -157,22 +170,37 @@ async function cmdCheckpoint(args) {
 	const journal = Journal.open(root);
 
 	const maxBytes = Number(args.flags["max-bytes"] ?? DEFAULT_MAX_FILE_BYTES);
-	const id = journal.createCheckpoint({ root, label, source: args.flags.source ?? "cli" });
 
-	const tree = scanTree(root, { maxFileBytes: Number.isFinite(maxBytes) ? maxBytes : DEFAULT_MAX_FILE_BYTES });
-	const { fileCount, totalBytes } = persistTree(journal, id, tree);
+	// Scan before opening the write transaction. Reading the tree is the slow
+	// part and needs no lock; holding the journal's write lock across it would
+	// make every parallel checkpoint wait on disk I/O it does not care about.
+	const tree = scanTree(root, {
+		maxFileBytes: Number.isFinite(maxBytes) ? maxBytes : DEFAULT_MAX_FILE_BYTES,
+	});
 
 	const dbs = toArray(args.flags.db);
 	const tables = toArray(args.flags.table);
-	let rowCount = 0;
-	const captured = [];
-	for (const dbPath of dbs) {
-		const result = captureTables(journal, id, { root, dbPath, tables });
-		rowCount += result.rowCount;
-		captured.push(result);
-	}
 
-	journal.finaliseCheckpoint(id, { fileCount, totalBytes, dbCount: rowCount });
+	// One transaction for the whole checkpoint. If anything below throws, the
+	// rollback removes the row along with the half-written content, so a failed
+	// checkpoint cannot leave behind something that looks restorable and is not.
+	const result = journal.transaction(() => {
+		const id = journal.createCheckpoint({ root, label, source: args.flags.source ?? "cli" });
+		const { fileCount, totalBytes } = persistTree(journal, id, tree);
+
+		let rowCount = 0;
+		const captured = [];
+		for (const dbPath of dbs) {
+			const capturedDb = captureTables(journal, id, { root, dbPath, tables });
+			rowCount += capturedDb.rowCount;
+			captured.push(capturedDb);
+		}
+
+		journal.finaliseCheckpoint(id, { fileCount, totalBytes, dbCount: rowCount });
+		return { id, fileCount, totalBytes, rowCount, captured };
+	});
+
+	const { id, fileCount, totalBytes, rowCount, captured } = result;
 	journal.close();
 
 	emit(
@@ -208,10 +236,15 @@ async function cmdList(args) {
 			}
 			for (const r of rows) {
 				const tag = r.label ? ` ${r.label}` : "";
+				// Say plainly that there is nothing to restore here, rather than
+				// leaving the reason to be guessed from a zero file count.
+				const status = isRestorable(r)
+					? r.status
+					: `${r.status} (incomplete, nothing to restore)`;
 				process.stdout.write(
 					`${shortId(r.id)}  ${formatWhen(r.created_at).padStart(8)}  ` +
 						`${String(r.file_count).padStart(5)} files  ${humanBytes(r.total_bytes).padStart(9)}  ` +
-						`${r.status}${tag}\n`,
+						`${status}${tag}\n`,
 				);
 			}
 		},
@@ -251,6 +284,11 @@ async function cmdShow(args) {
 	const id = parseOptionalId(args, journal, "show");
 	const cp = journal.getCheckpoint(id);
 	if (!cp) throw new Error(`no checkpoint ${args._[1]}`);
+	if (!isRestorable(cp)) {
+		throw new Error(
+			`checkpoint ${shortId(id)} is incomplete: it was never finished being written, so there is nothing in it to show`,
+		);
+	}
 	const dbTables = journal.listDbTables(id);
 	journal.close();
 	emit(
@@ -274,7 +312,15 @@ async function cmdDiff(args) {
 	const root = resolveRoot(args.flags);
 	const journal = requireJournal(root);
 	const id = parseOptionalId(args, journal, "diff");
-	if (!journal.getCheckpoint(id)) throw new Error(`no checkpoint ${args._[1]}`);
+	const cp = journal.getCheckpoint(id);
+	if (!cp) throw new Error(`no checkpoint ${args._[1]}`);
+	// Diffing an unfinished checkpoint reports every real file as newly added,
+	// which reads as "the agent created everything" and is a lie.
+	if (!isRestorable(cp)) {
+		throw new Error(
+			`checkpoint ${shortId(id)} is incomplete: it was never finished being written, so there is nothing in it to compare against`,
+		);
+	}
 	const files = diffTree(journal, id, root);
 	const dbs = toArray(args.flags.db);
 	let tables = { missing: [], updated: [], extra: [], droppedTables: [], identical: 0, errors: [] };
@@ -349,6 +395,11 @@ async function cmdRestore(args) {
 	const id = parseId(args._[1]);
 	const cp = journal.getCheckpoint(id);
 	if (!cp) throw new Error(`no checkpoint ${args._[1]}`);
+	if (!isRestorable(cp)) {
+		throw new Error(
+			`checkpoint ${shortId(id)} is incomplete: it was never finished being written, so there is nothing in it to restore`,
+		);
+	}
 
 	const dryRun = Boolean(args.flags["dry-run"]);
 	const purge = Boolean(args.flags.purge);
