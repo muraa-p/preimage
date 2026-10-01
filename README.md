@@ -1,5 +1,10 @@
 # preimage
 
+[![npm](https://img.shields.io/npm/v/preimage.svg)](https://www.npmjs.com/package/preimage)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-73%20passing-brightgreen)](#development)
+
 **The undo layer for AI agents.**
 
 Your agent is one confident `rm -rf` away from deleting a table, rewriting a
@@ -58,7 +63,7 @@ $ sqlite3 app.db "SELECT * FROM users"
 Run the whole demo yourself:
 
 ```bash
-git clone https://github.com/you/preimage && cd preimage
+git clone https://github.com/muraa-p/preimage && cd preimage
 node scripts/demo.mjs
 ```
 
