@@ -69,20 +69,38 @@ jobs:
       # this workflow, configured by hand on the package settings page -- see
       # CONTRIBUTING.md.
       #
-      # These are two separate steps rather than one step with a conditional env
-      # var on purpose. Setting NODE_AUTH_TOKEN to an empty string is NOT the
-      # same as leaving it unset: npm sees a configured-but-empty token, tries
-      # to authenticate with it, and fails with "need auth" without ever
-      # requesting an OIDC token. A step that does not exist cannot break
-      # authentication that way.
+      # Two separate publish steps, not one step with a conditional env var.
+      # Setting NODE_AUTH_TOKEN to an empty string is NOT the same as leaving it
+      # unset: npm sees a configured-but-empty token, tries to authenticate with
+      # it, and fails with "need auth" without ever requesting an OIDC token. A
+      # step that does not exist cannot break authentication that way.
+      #
+      # The branch is on a step output rather than on the secret directly,
+      # because `secrets` is not an available context in an `if` expression.
+      # Referencing it there makes GitHub reject the whole workflow file as
+      # invalid, before any of this runs.
+      - name: Decide how to authenticate
+        id: auth
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "using the NPM_TOKEN secret (Trusted Publishing not configured yet)"
+            echo "mode=token" >> "$GITHUB_OUTPUT"
+          else
+            echo "using Trusted Publishing (no secret in this repository)"
+            echo "mode=oidc" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish (token)
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: steps.auth.outputs.mode == 'token'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish (Trusted Publishing)
-        if: ${{ secrets.NPM_TOKEN == '' }}
+        if: steps.auth.outputs.mode == 'oidc'
         run: npm publish --provenance --access public
 
       - name: Create the GitHub release
