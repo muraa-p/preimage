@@ -90,14 +90,15 @@ export function tableExists(db, table) {
 	);
 }
 
-/** Read every row of a table as plain JSON-safe objects. */
+/**
+ * Read every row of a table as plain JSON-safe objects.
+ *
+ * Rows come back exactly as node:sqlite gives them: INTEGER PRIMARY KEY
+ * columns arrive as BigInt, BLOBs as Uint8Array. serialiseRow tags both so a
+ * later restore can put the same types back.
+ */
 export function readRows(db, table) {
-	return db.prepare(`SELECT * FROM ${quoteIdent(table)}`).all().map((row) => ({
-		...row,
-		__bigints: Object.fromEntries(
-			Object.entries(row).filter(([, v]) => typeof v === "bigint"),
-		),
-	}));
+	return db.prepare(`SELECT * FROM ${quoteIdent(table)}`).all();
 }
 
 /**
@@ -127,12 +128,38 @@ export function deserialiseRow(obj) {
 	const { __meta = { bigints: {}, b64: [] }, ...rest } = obj;
 	const out = {};
 	for (const [k, v] of Object.entries(rest)) {
-		if (k.startsWith("__b64_")) continue;
+		// Internal bookkeeping, never a real column.
+		if (k.startsWith("__")) continue;
 		if (__meta.b64.includes(`__b64_${k}`)) out[k] = Buffer.from(v, "base64");
 		else if (__meta.bigints[k] && v !== null) out[k] = BigInt(v);
 		else out[k] = v;
 	}
 	return out;
+}
+
+/**
+ * Key order independent JSON, so two objects holding the same data compare
+ * equal regardless of how they were built.
+ */
+function stableStringify(value) {
+	if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+	const keys = Object.keys(value).sort();
+	return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
+/**
+ * Is the row currently in the database the same as the row in the journal?
+ *
+ * Both sides go through serialiseRow, so a row read from disk and a row read
+ * out of the journal are always compared in the same shape. Comparing the raw
+ * objects instead reports every unchanged row as changed, because one side
+ * still carries serialisation metadata the other has stripped.
+ */
+export function sameRow(liveRow, storedRowJson) {
+	const live = stableStringify(serialiseRow(liveRow));
+	const stored = stableStringify(serialiseRow(deserialiseRow(JSON.parse(storedRowJson))));
+	return live === stored;
 }
 
 /** Stable identity for a row: JSON of its primary key values. */
@@ -238,14 +265,12 @@ export function diffTables(journal, checkpointId, root) {
 				current.set(rowKey(row, pkCols), row);
 			}
 			for (const row of rows) {
-				const want = deserialiseRow(JSON.parse(row.row_json));
 				const have = current.get(row.pk);
 				if (!have) {
 					result.missing.push({ dbPath: storePath, table, pk: row.pk });
 					continue;
 				}
-				const same = JSON.stringify(serialiseRow(have)) === JSON.stringify(want);
-				if (same) result.identical++;
+				if (sameRow(have, row.row_json)) result.identical++;
 				else result.updated.push({ dbPath: storePath, table, pk: row.pk });
 			}
 			for (const pk of current.keys()) {

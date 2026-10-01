@@ -390,3 +390,62 @@ test("a table name with a space does not corrupt grouping", (t) => {
 	db3.close();
 	j.close();
 });
+
+test("an untouched table diffs as identical, not as every row changed", (t) => {
+	const root = tmpRoot(t);
+	const abs = path.join(root, "app.db");
+	const db = new DatabaseSync(abs);
+	db.exec("CREATE TABLE invoices (id INTEGER PRIMARY KEY, total REAL, note TEXT)");
+	db.prepare("INSERT INTO invoices VALUES (?, ?, ?)").run(1, 420.5, "unchanged");
+	// A BLOB and an INTEGER PRIMARY KEY exercise the two types that do not
+	// survive a naive JSON comparison.
+	db.exec("CREATE TABLE payloads (id INTEGER PRIMARY KEY, payload BLOB)");
+	db.prepare("INSERT INTO payloads VALUES (?, ?)").run(1, Buffer.from([1, 2, 3, 255]));
+	db.close();
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db" });
+	j.finaliseCheckpoint(id, { dbCount: 2 });
+
+	const clean = diffTables(j, id, root);
+	assert.deepEqual(clean.errors, []);
+	assert.deepEqual(clean.updated, [], "nothing changed, so nothing is updated");
+	assert.deepEqual(clean.missing, []);
+	assert.deepEqual(clean.extra, []);
+	assert.equal(clean.identical, 2);
+
+	// Change exactly one row and only that row should be reported.
+	const db2 = new DatabaseSync(abs);
+	db2.prepare("UPDATE invoices SET note = ? WHERE id = 1").run("agent was here");
+	db2.close();
+
+	const dirty = diffTables(j, id, root);
+	assert.deepEqual(dirty.updated, [{ dbPath: "app.db", table: "invoices", pk: "[1]" }]);
+	assert.equal(dirty.identical, 1);
+	j.close();
+});
+
+test("a row that differs only in column order still diffs as identical", (t) => {
+	const root = tmpRoot(t);
+	const abs = path.join(root, "app.db");
+	const db = new DatabaseSync(abs);
+	db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)");
+	db.prepare("INSERT INTO t VALUES (?, ?, ?)").run(1, "x", "y");
+	db.close();
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["t"] });
+	j.finaliseCheckpoint(id, { dbCount: 1 });
+
+	// Rebuild the row so the keys land in a different order.
+	const db2 = new DatabaseSync(abs);
+	db2.prepare("INSERT OR REPLACE INTO t (b, a, id) VALUES (?, ?, ?)").run("y", "x", 1);
+	db2.close();
+
+	const d = diffTables(j, id, root);
+	assert.deepEqual(d.updated, []);
+	assert.equal(d.identical, 1);
+	j.close();
+});

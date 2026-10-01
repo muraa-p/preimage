@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/preimage.svg)](https://www.npmjs.com/package/preimage)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-89%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-91%20passing-brightgreen)](#development)
 
 **The undo layer for AI agents.**
 
@@ -53,9 +53,20 @@ checkpoint 0001 created
   2 rows across 1 database(s)
 
 $ # a migration drops a user, promotes another, invents a third
+$ preimage diff 1
+diff against checkpoint 0001
+  0 added
+  0 modified
+  0 deleted
+  0 unchanged
+  rows: 1 missing, 1 changed, 1 extra
+
 $ preimage restore 1 --remove-extra
 restored checkpoint 0001 (before migration)
+  0 files written
+  0 already identical
   2 rows written
+  1 rows removed
 
 $ sqlite3 app.db "SELECT * FROM users"
 [{"id":1,"email":"ada@org.org","role":"admin"},
@@ -64,6 +75,39 @@ $ sqlite3 app.db "SELECT * FROM users"
 
 `ada` is an admin again. `bob` is back. The ghost row is gone. No commit, no
 `git checkout`, no hand-written `UPDATE`.
+
+And when the agent drops a whole table, the schema comes back with it:
+
+```
+$ preimage checkpoint "before the schema change" --db app.db
+checkpoint 0001 created
+  1 files, 12 KB
+  2 rows across 1 database(s)
+
+$ # the agent decides users is no longer needed
+$ preimage diff 1
+diff against checkpoint 0001
+  0 added
+  0 modified
+  0 deleted
+  0 unchanged
+  rows: 1 missing, 0 changed, 0 extra
+  table dropped: app.db:users
+
+$ preimage restore 1 --yes
+restored checkpoint 0001 (before the schema change)
+  0 files written
+  0 already identical
+  1 tables recreated
+  2 rows written
+
+$ sqlite3 app.db ".tables"
+invoices users
+```
+
+`DROP TABLE users` is undoable. preimage stored the `CREATE` statement next to
+the rows, so recreating the table is part of the restore rather than a separate
+recovery ritual.
 
 Run the whole demo yourself:
 
@@ -245,9 +289,9 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 89 tests, node:test
+npm test          # 91 tests, node:test
 npm run check     # syntax check every entrypoint
-node scripts/demo.mjs             # both stories, instant
+node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story
 ```
 

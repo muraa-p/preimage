@@ -22,7 +22,7 @@ no dependencies.
 
 ```sh
 npm run check   # syntax check every source file
-npm test        # 89 tests
+npm test        # 91 tests
 ```
 
 Both must pass. CI additionally runs them on Linux, macOS and Windows across

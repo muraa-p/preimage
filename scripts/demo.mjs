@@ -142,6 +142,56 @@ if (want(2)) {
 		`${c(DIM, "│")} ${c(GREEN, "ada is an admin again, bob is back, ghost is gone")}\n`,
 	);
 }
+
+if (want(3)) {
+	process.stdout.write(
+		c(BOLD, "\n\nStory 3: the agent dropped a table outright\n"),
+	);
+
+	const dropDir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-drop-"));
+	const dbPath = path.join(dropDir, "app.db");
+	const seed = new DatabaseSync(dbPath);
+	seed.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)");
+	seed.exec("CREATE TABLE invoices (id INTEGER PRIMARY KEY, total REAL)");
+	seed.prepare("INSERT INTO users VALUES (?, ?)").run(1, "ada@org.org");
+	seed.prepare("INSERT INTO invoices VALUES (?, ?)").run(1, 420.5);
+	seed.close();
+
+	// The CREATE statement is stored with the rows, which is the only reason
+	// this is undoable at all.
+	step(`preimage checkpoint "before the schema change" --root <project> --db app.db`);
+	show(run(["checkpoint", "before the schema change", "--root", dropDir, "--db", "app.db"]));
+
+	step("# the agent decides users is no longer needed");
+	const wreck = new DatabaseSync(dbPath);
+	wreck.exec("DROP TABLE users");
+	wreck.close();
+	process.stdout.write(`${c(DIM, "│")} ${c(YELLOW, "DROP TABLE users")}\n`);
+	hold(READ_MS);
+
+	step(`preimage diff 1 --root <project>`);
+	show(run(["diff", "1", "--root", dropDir]));
+
+	step(`preimage restore 1 --root <project> --yes`);
+	show(run(["restore", "1", "--root", dropDir, "--yes"]));
+
+	const verify = new DatabaseSync(dbPath, { readOnly: true });
+	const tables = verify
+		.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+		.all()
+		.map((r) => r.name);
+	const rows = verify.prepare("SELECT * FROM users").all();
+	verify.close();
+
+	step("schema and rows afterwards");
+	process.stdout.write(`${c(DIM, "│")} tables: ${c(CYAN, JSON.stringify(tables))}\n`);
+	process.stdout.write(`${c(DIM, "│")} users:  ${c(CYAN, JSON.stringify(rows))}\n`);
+	process.stdout.write(
+		`${c(DIM, "│")} ${c(GREEN, "the table came back, with its schema, with its row")}\n`,
+	);
+
+	fs.rmSync(dropDir, { recursive: true, force: true });
+}
 process.stdout.write("\n");
 } finally {
 	fs.rmSync(dir, { recursive: true, force: true });

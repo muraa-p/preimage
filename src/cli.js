@@ -281,21 +281,35 @@ async function cmdDiff(args) {
 	if (dbs.length > 0 || journal.listDbTables(id).length > 0) {
 		tables = diffTables(journal, id, root);
 	}
+
+	// A database captured with --db is reported by the rows section. Listing it
+	// in the file section too would count the same change twice and read as if
+	// the file would be rewritten byte-for-byte on restore, which it is not.
+	const tableOwned = new Set(journal.listDbTables(id).map((t) => t.db_path));
 	journal.close();
+	const pathOf = (item) => (typeof item === "string" ? item : item.path);
+	const isPlainFile = (item) => !tableOwned.has(pathOf(item));
+	const plain = {
+		added: files.added.filter(isPlainFile),
+		modified: files.modified.filter(isPlainFile),
+		removed: files.removed.filter(isPlainFile),
+	};
 
 	const changed = files.added.length + files.modified.length + files.removed.length;
 	emit(
 		args,
 		() => {
 			process.stdout.write(`diff against checkpoint ${shortId(id)}\n`);
-			process.stdout.write(`  ${files.added.length} added\n`);
-			process.stdout.write(`  ${files.modified.length} modified\n`);
-			process.stdout.write(`  ${files.removed.length} deleted\n`);
+			process.stdout.write(`  ${plain.added.length} added\n`);
+			process.stdout.write(`  ${plain.modified.length} modified\n`);
+			process.stdout.write(`  ${plain.removed.length} deleted\n`);
 			process.stdout.write(`  ${files.unchanged.length} unchanged\n`);
 			if (files.unreadable.length > 0) {
 				process.stdout.write(`  ${files.unreadable.length} unreadable from journal\n`);
 			}
-			if (tables.missing.length || tables.updated.length || tables.extra.length) {
+			const rowTotal =
+				tables.missing.length + tables.updated.length + tables.extra.length + tables.droppedTables.length;
+			if (rowTotal > 0) {
 				process.stdout.write(
 					`  rows: ${tables.missing.length} missing, ${tables.updated.length} changed, ${tables.extra.length} extra\n`,
 				);
@@ -304,9 +318,9 @@ async function cmdDiff(args) {
 			for (const t of tables.droppedTables) {
 				process.stdout.write(`  table dropped: ${t.dbPath}:${t.table}\n`);
 			}
-			for (const list of [files.modified, files.removed, files.added]) {
+			for (const list of [plain.modified, plain.removed, plain.added]) {
 				for (const item of list.slice(0, 20)) {
-					process.stdout.write(`    ${typeof item === "string" ? item : item.path}\n`);
+					process.stdout.write(`    ${pathOf(item)}\n`);
 				}
 			}
 		},
@@ -315,12 +329,15 @@ async function cmdDiff(args) {
 			id,
 			changed,
 			files: {
-				added: files.added.map((f) => f.path),
-				modified: files.modified.map((f) => f.path),
-				deleted: files.removed,
+				added: plain.added.map((f) => f.path),
+				modified: plain.modified.map((f) => f.path),
+				deleted: plain.removed,
 				unchanged: files.unchanged,
 				unreadable: files.unreadable,
 			},
+			// Reported separately so a caller can still see that a database file
+			// changed on disk even though restore handles it table by table.
+			tableOwnedDatabases: [...tableOwned],
 			tables,
 		}),
 	);
