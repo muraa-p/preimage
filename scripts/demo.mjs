@@ -59,10 +59,17 @@ function show(output) {
 	hold(READ_MS);
 }
 
+// Which story to run. Both by default, which is what the README quotes. The
+// tape files record them one at a time so each transcript fits on screen.
+const storyArg = process.argv.find((a) => a.startsWith("--story="));
+const only = storyArg ? storyArg.split("=")[1] : null;
+const want = (n) => only === null || only === String(n);
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-"));
 const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-db-"));
 
 try {
+if (want(1)) {
 	process.stdout.write(c(BOLD, "\nStory 1: the agent rewrote your config and deleted a file\n"));
 
 	fs.writeFileSync(path.join(dir, "config.json"), '{"port":3000,"db":"prod"}');
@@ -93,7 +100,9 @@ try {
 			`src/server.js: restored\n` +
 			`EMERGENCY.js: ${fs.existsSync(path.join(dir, "EMERGENCY.js")) ? "still here" : c(GREEN, "gone")}`,
 	);
+}
 
+if (want(2)) {
 	process.stdout.write(c(BOLD, "\n\nStory 2: the agent ran a migration it should not have\n"));
 
 	const dbPath = path.join(dbDir, "app.db");
@@ -132,7 +141,8 @@ try {
 	process.stdout.write(
 		`${c(DIM, "│")} ${c(GREEN, "ada is an admin again, bob is back, ghost is gone")}\n`,
 	);
-	process.stdout.write("\n");
+}
+process.stdout.write("\n");
 } finally {
 	fs.rmSync(dir, { recursive: true, force: true });
 	fs.rmSync(dbDir, { recursive: true, force: true });
