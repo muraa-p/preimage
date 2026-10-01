@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS db_tables (
   checkpoint_id INTEGER NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
   db_path      TEXT NOT NULL,
   table_name   TEXT NOT NULL,
+  ddl          TEXT,
   UNIQUE (checkpoint_id, db_path, table_name)
 );
 
@@ -81,12 +82,34 @@ function norm(value) {
 	return String(value);
 }
 
+/**
+ * Columns added after the first release. `CREATE TABLE IF NOT EXISTS` will not
+ * touch a table that already exists, so a journal written by an older preimage
+ * would otherwise fail on the first query that names a new column. Adding a
+ * nullable column is cheap and idempotent; a destructive change would need a
+ * real migration tool and a version marker.
+ */
+const ADDED_COLUMNS = [["db_tables", "ddl", "TEXT"]];
+
+function migrate(db) {
+	for (const [table, column, type] of ADDED_COLUMNS) {
+		const existing = db
+			.prepare(`PRAGMA table_info(${table})`)
+			.all()
+			.some((c) => c.name === column);
+		if (!existing) {
+			db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+		}
+	}
+}
+
 export class Journal {
 	constructor(dbPath) {
 		ensureDir(journalDir(dbPath.replace(/[/\\]journal\.db$/, "")));
 		this.path = dbPath;
 		this.db = new DatabaseSync(dbPath);
 		this.db.exec(SCHEMA);
+		migrate(this.db);
 	}
 
 	static open(root) {
@@ -192,18 +215,18 @@ export class Journal {
 
 	// --- database rows -----------------------------------------------------
 
-	addDbTable({ checkpointId, dbPath, table }) {
+	addDbTable({ checkpointId, dbPath, table, ddl = null }) {
 		this.db
 			.prepare(
-				"INSERT OR REPLACE INTO db_tables (checkpoint_id, db_path, table_name) VALUES (?, ?, ?)",
+				"INSERT OR REPLACE INTO db_tables (checkpoint_id, db_path, table_name, ddl) VALUES (?, ?, ?, ?)",
 			)
-			.run(norm(checkpointId), dbPath, table);
+			.run(norm(checkpointId), dbPath, table, norm(ddl));
 	}
 
 	listDbTables(checkpointId) {
 		return this.db
 			.prepare(
-				'SELECT db_path, table_name AS "table" FROM db_tables WHERE checkpoint_id = ? ORDER BY db_path, table_name',
+				'SELECT db_path, table_name AS "table", ddl FROM db_tables WHERE checkpoint_id = ? ORDER BY db_path, table_name',
 			)
 			.all(norm(checkpointId));
 	}

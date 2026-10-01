@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import { Journal } from "../src/journal.js";
 import { scanTree, persistTree, diffTree, loadTree } from "../src/capture.js";
 import { restoreFiles } from "../src/restore.js";
+import { captureTables, restoreTables } from "../src/dbadapter.js";
 
 function tmpRoot(t) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-"));
@@ -329,4 +331,143 @@ test("loadTree hydrates bytes for every entry", (t) => {
 	assert.equal(entries[0].bytes.toString(), "xyz");
 	assert.equal(entries[0].kind, "file");
 	j.close();
+});
+
+test("file restore skips a database owned by the table adapter", (t) => {
+	const root = tmpRoot(t);
+	const dbAbs = path.join(root, "app.db");
+	const db = new DatabaseSync(dbAbs);
+	db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)");
+	db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)");
+	db.prepare("INSERT INTO users VALUES (?, ?)").run(1, "ada@x.com");
+	db.prepare("INSERT INTO notes VALUES (?, ?)").run(1, "pre-existing");
+	db.close();
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	// The file layer snapshots the .db like any other file.
+	persistTree(j, id, scanTree(root));
+	// The table layer claims it for `users` only.
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["users"] });
+	j.finaliseCheckpoint(id, { fileCount: 1, dbCount: 1 });
+
+	// The agent changes both tables.
+	const db2 = new DatabaseSync(dbAbs);
+	db2.exec("DELETE FROM users");
+	db2.prepare("INSERT INTO notes VALUES (?, ?)").run(2, "AGENT INSERTED THIS");
+	db2.close();
+
+	// If the file layer rewrote app.db, the agent's notes row would vanish and
+	// table scope would mean nothing. Table scope must win.
+	const fileResult = restoreFiles(j, id, root, {});
+	assert.deepEqual(fileResult.tableOwned, ["app.db"]);
+	assert.deepEqual(fileResult.written, []);
+
+	const tableResult = restoreTables(j, id, root, {});
+	assert.deepEqual(tableResult.errors, []);
+
+	const db3 = new DatabaseSync(dbAbs, { readOnly: true });
+	assert.equal(Number(db3.prepare("SELECT COUNT(*) AS n FROM users").get().n), 1);
+	assert.equal(Number(db3.prepare("SELECT COUNT(*) AS n FROM notes").get().n), 2);
+	db3.close();
+	j.close();
+});
+
+test("purge refuses to delete a database the table adapter owns", (t) => {
+	const root = tmpRoot(t);
+	// The agent creates a brand new database after the checkpoint.
+	write(root, "keep.txt", "keep");
+	const newDb = path.join(root, "agent.db");
+	const db = new DatabaseSync(newDb);
+	db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+	db.prepare("INSERT INTO t VALUES (1)").run();
+	db.close();
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	persistTree(j, id, scanTree(root));
+	// The checkpoint claims agent.db at table level even though it has no rows.
+	j.addDbTable({ checkpointId: id, dbPath: "agent.db", table: "t", ddl: "CREATE TABLE t (id INTEGER PRIMARY KEY)" });
+	j.finaliseCheckpoint(id, { fileCount: 1, dbCount: 1 });
+
+	const result = restoreFiles(j, id, root, { purge: true });
+	assert.equal(result.purged.includes("agent.db"), false);
+	assert.equal(fs.existsSync(newDb), true);
+	j.close();
+});
+
+test("purge removes directories it empties", (t) => {
+	const root = tmpRoot(t);
+	write(root, "keep.txt", "keep");
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	persistTree(j, id, scanTree(root));
+	j.finaliseCheckpoint(id, { fileCount: 1, dbCount: 0 });
+
+	write(root, "scratch/deep/a.js", "a");
+	write(root, "scratch/deep/b.js", "b");
+	write(root, "scratch/loose.txt", "c");
+
+	const result = restoreFiles(j, id, root, { purge: true });
+	assert.equal(fs.existsSync(path.join(root, "scratch")), false);
+	assert.ok(result.purged.includes("scratch/deep/a.js"));
+	assert.ok(result.purgedDirs.includes("scratch/deep"));
+	assert.ok(result.purgedDirs.includes("scratch"));
+	j.close();
+});
+
+test("purge leaves a directory that still holds tracked files", (t) => {
+	const root = tmpRoot(t);
+	write(root, "src/tracked.js", "keep me");
+	write(root, "src/deep/tracked.js", "keep me too");
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	persistTree(j, id, scanTree(root));
+	j.finaliseCheckpoint(id, { fileCount: 2, dbCount: 0 });
+
+	write(root, "src/deep/agent.js", "temp");
+
+	restoreFiles(j, id, root, { purge: true });
+	assert.equal(fs.existsSync(path.join(root, "src/deep/agent.js")), false);
+	assert.equal(fs.existsSync(path.join(root, "src/deep/tracked.js")), true);
+	assert.equal(fs.existsSync(path.join(root, "src")), true);
+	j.close();
+});
+
+// A journal written before db_tables had a ddl column must still open.
+test("a journal from an older preimage gets the ddl column added", (t) => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-migrate-"));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+	const j = Journal.open(dir);
+	const id = j.createCheckpoint({ root: dir });
+	j.close();
+
+	// Rebuild db_tables exactly as the first release defined it.
+	const raw = new DatabaseSync(path.join(dir, ".preimage", "journal.db"));
+	raw.exec("DROP TABLE db_tables");
+	raw.exec(`
+    CREATE TABLE db_tables (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      checkpoint_id INTEGER NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+      db_path      TEXT NOT NULL,
+      table_name   TEXT NOT NULL,
+      UNIQUE (checkpoint_id, db_path, table_name)
+    );
+  `);
+	raw.close();
+
+	const j2 = Journal.open(dir);
+	const cols = j2.db
+		.prepare("PRAGMA table_info(db_tables)")
+		.all()
+		.map((c) => c.name);
+	assert.ok(cols.includes("ddl"), "ddl column should be added on open");
+
+	// And the new column is actually writable.
+	j2.addDbTable({ checkpointId: id, dbPath: "app.db", table: "users", ddl: "CREATE TABLE users (id)" });
+	assert.equal(j2.listDbTables(id)[0].ddl, "CREATE TABLE users (id)");
+	j2.close();
 });

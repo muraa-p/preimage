@@ -1,9 +1,10 @@
 # preimage
 
+[![ci](https://github.com/muraa-p/preimage/actions/workflows/ci.yml/badge.svg)](https://github.com/muraa-p/preimage/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/preimage.svg)](https://www.npmjs.com/package/preimage)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-73%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-89%20passing-brightgreen)](#development)
 
 **The undo layer for AI agents.**
 
@@ -106,9 +107,13 @@ one window where a non-human is editing your machine.
 preimage init                          # create the journal
 preimage checkpoint "before refactor"  # snapshot now
 preimage list                          # see checkpoints
-preimage diff 3                        # what changed since then
+preimage diff                          # what changed since the latest
+preimage diff 3                        # ...since a specific one
 preimage restore 3                     # put it back
 ```
+
+`diff` and `show` default to the most recent checkpoint. `restore` always wants
+an explicit id, because guessing wrong there is expensive.
 
 Every command takes `--json` for machine-readable output.
 
@@ -186,7 +191,11 @@ This tool deletes things, so the defaults are conservative.
 - **Path traversal is blocked.** A tampered journal record cannot write outside
   the project root.
 - **Table scope is explicit.** preimage never snapshots an entire database
-  silently. You name the tables, or you opt in per database.
+  silently. You name the tables, or you opt in per database. And a database you
+  captured with `--db` is restored table by table, never as a file — that's the
+  only way `--table users` can leave `audit_log` alone.
+- **A dropped table comes back.** The `CREATE` statement is stored alongside the
+  rows, so `DROP TABLE users` is undoable, schema included.
 
 ## How it works
 
@@ -197,7 +206,7 @@ A checkpoint is a content-addressed snapshot in a SQLite journal at
 checkpoints   id, created_at, label, source, status
 files         checkpoint_id, path, kind, mode, size, sha
 blobs         sha, bytes            -- deduplicated by content hash
-db_tables     checkpoint_id, db_path, table_name
+db_tables     checkpoint_id, db_path, table_name, ddl
 db_rows       checkpoint_id, db_path, table_name, pk, row_json
 ```
 
@@ -207,8 +216,14 @@ skipped, which makes restore idempotent and fast. `preimage gc` drops blobs no
 longer referenced.
 
 Database rows are stored as JSON keyed by primary key (falling back to `rowid`),
-with BigInt and BLOB columns tagged so they round-trip exactly. Restores run
-inside a transaction per table.
+with BigInt and BLOB columns tagged so they round-trip exactly. Each table's
+`CREATE` statement is stored too, which is what lets restore rebuild a table the
+agent dropped. Restores run inside a transaction per table.
+
+A database captured with `--db` is handed to the table adapter and removed from
+the file layer's work list. Without that, restoring `--table users` would
+rewrite the whole `.db` file and silently revert every table you never asked
+about.
 
 Add `.preimage/` to `.gitignore`.
 
@@ -230,11 +245,15 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 73 tests, node:test
+npm test          # 89 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # both stories, instant
 node scripts/demo.mjs --story=1   # just one story
 ```
+
+CI runs the suite on Linux, macOS and Windows across Node 22 and 24, and
+additionally installs the packed tarball into a clean project to check that the
+real binary works from a real install.
 
 ### Re-recording the demos
 
@@ -254,7 +273,12 @@ and update the transcripts here in the same commit.
 ## Contributing
 
 Issues and PRs welcome. Keep it dependency-free — that constraint is the whole
-security argument for a tool that sits in the agent's hot path.
+security argument for a tool that sits in the agent's hot path. Destructive
+behaviour stays behind a flag, and every bug fix ships with the test that fails
+without it.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Vulnerabilities go to
+[SECURITY.md](SECURITY.md), not the issue tracker.
 
 ## License
 

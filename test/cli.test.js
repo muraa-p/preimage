@@ -286,3 +286,71 @@ test("--help exits zero and prints usage", async (t) => {
 	const { stdout } = await run(["--help"]);
 	assert.match(stdout, /the undo layer for AI agents/);
 });
+
+test("diff with no id compares against the most recent checkpoint", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+	await run(["checkpoint", "first", "--root", root]);
+
+	// A second checkpoint, so "latest" is not simply "the only one".
+	write(root, "a.txt", "two");
+	await run(["checkpoint", "second", "--root", root]);
+	write(root, "a.txt", "three");
+
+	const implicit = await runJson(["diff", "--root", root, "--json"]);
+	const explicit = await runJson(["diff", "2", "--root", root, "--json"]);
+	assert.deepEqual(implicit.files, explicit.files);
+	assert.equal(implicit.id, 2);
+	assert.deepEqual(implicit.files.modified, ["a.txt"]);
+});
+
+test("show with no id summarises the most recent checkpoint", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+	await run(["checkpoint", "first", "--root", root]);
+	write(root, "a.txt", "two");
+	await run(["checkpoint", "second", "--root", root]);
+
+	const implicit = await runJson(["show", "--root", root, "--json"]);
+	const explicit = await runJson(["show", "2", "--root", root, "--json"]);
+	assert.deepEqual(implicit, explicit);
+	assert.equal(implicit.checkpoint.id, 2);
+	assert.equal(implicit.checkpoint.label, "second");
+});
+
+test("diff with no checkpoints explains what to do first", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+	await run(["init", "--root", root]);
+	const res = await run(["diff", "--root", root], { expectFail: true });
+	assert.match(res.stderr, /no checkpoints yet/);
+	assert.match(res.stderr, /preimage checkpoint/);
+});
+
+test("restore still requires an explicit id", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.txt", "one");
+	await run(["checkpoint", "--root", root]);
+
+	// Defaulting restore to "latest" would silently roll back the wrong thing
+	// whenever someone has several checkpoints and no clear memory of which.
+	const res = await run(["restore", "--root", root, "--yes"], { expectFail: true });
+	assert.match(res.stderr, /checkpoint id required/);
+});
+
+test("checkpoint reports a table that does not exist instead of claiming success", async (t) => {
+	const root = tmpRoot(t);
+	const dbAbs = path.join(root, "app.db");
+	const db = new DatabaseSync(dbAbs);
+	db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)");
+	db.prepare("INSERT INTO users VALUES (?, ?)").run(1, "a@example.com");
+	db.close();
+
+	const res = await runJson(
+		["checkpoint", "--root", root, "--db", "app.db", "--table", "users", "--table", "ghost", "--json"],
+	);
+	assert.equal(res.ok, true);
+	assert.deepEqual(res.databases[0].skipped, ["ghost"]);
+	assert.deepEqual(res.databases[0].tables, ["users"]);
+	assert.equal(res.rowCount, 1);
+});

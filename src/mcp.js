@@ -207,7 +207,11 @@ function handleTool(name, args, root) {
 						written: fileResult.written.map((w) => w.path),
 						unchanged: fileResult.unchanged,
 						purged: fileResult.purged,
+						purgedDirs: fileResult.purgedDirs,
 						skipped: fileResult.skipped,
+						// Databases handled by the table adapter. Surfaced so an agent
+						// does not read their absence from `written` as a failure.
+						tableOwned: fileResult.tableOwned,
 						errors: fileResult.errors,
 					},
 					tables: tableResult,

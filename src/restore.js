@@ -23,6 +23,42 @@ function safeJoin(root, rel) {
 }
 
 /**
+ * Databases this checkpoint captured at the table level. The table adapter owns
+ * those files. If the file layer also rewrote them, restoring `--table users`
+ * would silently revert every other table in the database, which is exactly the
+ * surprise the explicit table scope exists to prevent.
+ */
+function tableOwnedDatabases(journal, checkpointId) {
+	const owned = new Set();
+	for (const t of journal.listDbTables(checkpointId)) {
+		const base = normaliseRel(t.db_path);
+		owned.add(base);
+		// SQLite sidecar files describe the same database and must travel with it.
+		owned.add(`${base}-wal`);
+		owned.add(`${base}-shm`);
+		owned.add(`${base}-journal`);
+	}
+	return owned;
+}
+
+function normaliseRel(p) {
+	return String(p).split(path.sep).join("/").replace(/^\.\//, "");
+}
+
+/** Directories that purge emptied, deepest first, so parents can be pruned. */
+function prunableDirs(purged) {
+	const dirs = new Set();
+	for (const rel of purged) {
+		let dir = path.posix.dirname(rel.split(path.sep).join("/"));
+		while (dir && dir !== "." && dir !== "/") {
+			dirs.add(dir);
+			dir = path.posix.dirname(dir);
+		}
+	}
+	return [...dirs].sort((a, b) => b.length - a.length);
+}
+
+/**
  * Restore every file recorded in the checkpoint.
  * Returns counts and a per-path breakdown for reporting.
  */
@@ -33,13 +69,21 @@ export function restoreFiles(journal, checkpointId, root, { purge = false, dryRu
 		unchanged: 0,
 		skipped: [],
 		purged: [],
+		purgedDirs: [],
+		tableOwned: [],
 		errors: [],
 		dryRun,
 	};
 
 	const knownPaths = new Set(entries.map((e) => e.path));
+	const tableOwned = tableOwnedDatabases(journal, checkpointId);
 
 	for (const entry of entries) {
+		// Handled by the table adapter; writing it here would defeat table scope.
+		if (tableOwned.has(entry.path)) {
+			result.tableOwned.push(entry.path);
+			continue;
+		}
 		if (entry.bytes && isSkipMarker(entry.bytes)) {
 			result.skipped.push({ path: entry.path, reason: "too-large to store" });
 			continue;
@@ -119,6 +163,10 @@ export function restoreFiles(journal, checkpointId, root, { purge = false, dryRu
 		const now = scanTree(root);
 		for (const rel of now.keys()) {
 			if (knownPaths.has(rel)) continue;
+			// A database captured at table level is never a stray file, even if the
+			// agent created it after the checkpoint. Purging it would destroy the
+			// rows restore is about to put back.
+			if (tableOwned.has(rel)) continue;
 			let abs;
 			try {
 				abs = safeJoin(root, rel);
@@ -134,6 +182,25 @@ export function restoreFiles(journal, checkpointId, root, { purge = false, dryRu
 				result.purged.push(rel);
 			} catch (err) {
 				result.errors.push(`${rel}: ${err.message}`);
+			}
+		}
+
+		// Purging files leaves their directories behind, which reads as an
+		// incomplete restore. Remove directories that are now empty.
+		if (!dryRun) {
+			for (const dir of prunableDirs(result.purged)) {
+				let abs;
+				try {
+					abs = safeJoin(root, dir);
+				} catch {
+					continue;
+				}
+				try {
+					fs.rmdirSync(abs);
+					result.purgedDirs.push(dir);
+				} catch {
+					// Not empty, or already gone. Nothing to do.
+				}
 			}
 		}
 	}

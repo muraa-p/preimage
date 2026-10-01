@@ -290,3 +290,103 @@ test("restore leaves tables the checkpoint never captured alone", (t) => {
 	db2.close();
 	j.close();
 });
+
+test("capture records the CREATE statement so a dropped table can come back", (t) => {
+	const root = tmpRoot(t);
+	makeDb(root);
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["users"] });
+	const stored = j.listDbTables(id).find((x) => x.table === "users");
+	assert.match(stored.ddl, /CREATE TABLE users/);
+	j.close();
+});
+
+test("restore recreates a table the agent dropped, schema and rows", (t) => {
+	const root = tmpRoot(t);
+	const abs = makeDb(root);
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["users"] });
+	j.finaliseCheckpoint(id, { dbCount: 1 });
+
+	const db = new DatabaseSync(abs);
+	db.exec("DROP TABLE users");
+	db.close();
+	assert.equal(listTables(abs).includes("users"), false);
+
+	const summary = restoreTables(j, id, root, {});
+	assert.deepEqual(summary.errors, []);
+	assert.equal(summary.created, 1);
+	assert.equal(summary.restored, 2);
+
+	const db2 = new DatabaseSync(abs, { readOnly: true });
+	assert.deepEqual(listTables(abs), ["notes", "users"]);
+	const row = db2.prepare("SELECT email, name, score FROM users WHERE id = 1").get();
+	assert.equal(row.email, "a@example.com");
+	assert.equal(row.name, "Ada");
+	assert.equal(row.score, 10.5);
+	db2.close();
+	j.close();
+});
+
+test("diff reports a dropped table instead of failing on it", (t) => {
+	const root = tmpRoot(t);
+	const abs = makeDb(root);
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["users"] });
+	j.finaliseCheckpoint(id, { dbCount: 1 });
+
+	const db = new DatabaseSync(abs);
+	db.exec("DROP TABLE users");
+	db.close();
+
+	const d = diffTables(j, id, root);
+	assert.deepEqual(d.errors, []);
+	assert.deepEqual(d.droppedTables, [{ dbPath: "app.db", table: "users" }]);
+	assert.equal(d.missing.length, 2);
+	j.close();
+});
+
+test("capture skips a named table that does not exist instead of throwing", (t) => {
+	const root = tmpRoot(t);
+	makeDb(root);
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	const res = captureTables(j, id, { root, dbPath: "app.db", tables: ["users", "ghost"] });
+	assert.deepEqual(res.skipped, ["ghost"]);
+	assert.deepEqual(res.tables, ["users"]);
+	assert.equal(res.rowCount, 2);
+	j.close();
+});
+
+test("a table name with a space does not corrupt grouping", (t) => {
+	const root = tmpRoot(t);
+	const abs = path.join(root, "app.db");
+	const db = new DatabaseSync(abs);
+	db.exec(`CREATE TABLE "order details" (id INTEGER PRIMARY KEY, note TEXT)`);
+	db.prepare(`INSERT INTO "order details" VALUES (?, ?)`).run(1, "kept");
+	db.exec(`CREATE TABLE "order" (id INTEGER PRIMARY KEY, note TEXT)`);
+	db.prepare(`INSERT INTO "order" VALUES (?, ?)`).run(1, "also kept");
+	db.close();
+
+	const j = Journal.open(root);
+	const id = j.createCheckpoint({ root });
+	captureTables(j, id, { root, dbPath: "app.db", tables: ["order details", "order"] });
+	j.finaliseCheckpoint(id, { dbCount: 2 });
+
+	const db2 = new DatabaseSync(abs);
+	db2.exec(`DELETE FROM "order details"`);
+	db2.prepare(`UPDATE "order" SET note = 'agent was here'`).run();
+	db2.close();
+
+	const summary = restoreTables(j, id, root, {});
+	assert.deepEqual(summary.errors, []);
+
+	const db3 = new DatabaseSync(abs, { readOnly: true });
+	assert.equal(db3.prepare(`SELECT note FROM "order details" WHERE id = 1`).get().note, "kept");
+	assert.equal(db3.prepare(`SELECT note FROM "order" WHERE id = 1`).get().note, "also kept");
+	db3.close();
+	j.close();
+});

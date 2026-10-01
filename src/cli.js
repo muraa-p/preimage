@@ -22,8 +22,8 @@ COMMANDS
   init                          Create the journal for the current directory
   checkpoint [label]            Snapshot files (and optionally tables) now
   list                          List recent checkpoints
-  show <id>                     Summarise one checkpoint
-  diff <id>                     Show what changed since a checkpoint
+  show [id]                     Summarise one checkpoint (default: latest)
+  diff [id]                     Show what changed since a checkpoint (default: latest)
   restore <id>                  Put files and tables back to a checkpoint
   tables <db>                   List tables in a SQLite database
   hook install <target>         Print an agent hook config (claude-code|opencode)
@@ -42,6 +42,7 @@ COMMON OPTIONS
 
 EXAMPLES
   preimage checkpoint "before refactor"
+  preimage diff                # latest checkpoint
   preimage diff 0003
   preimage restore 0003 --purge
   preimage checkpoint --db ./app.db --table users --table orders
@@ -182,6 +183,12 @@ async function cmdCheckpoint(args) {
 			if (captured.length > 0) {
 				process.stdout.write(`  ${rowCount} rows across ${captured.length} database(s)\n`);
 			}
+			// Silently capturing fewer tables than asked for would be a lie.
+			for (const db of captured) {
+				for (const name of db.skipped) {
+					process.stdout.write(`  skipped missing table ${db.dbPath}:${name}\n`);
+				}
+			}
 		},
 		() => ({ ok: true, id, label, fileCount, totalBytes, rowCount, databases: captured }),
 	);
@@ -219,10 +226,29 @@ function parseId(value) {
 	return n;
 }
 
+/**
+ * The id for `diff` and `show`. Omitting it means "the most recent
+ * checkpoint", which is what someone means almost every time they type
+ * `preimage diff`. Explicit ids still win.
+ */
+function parseOptionalId(args, journal, command) {
+	const raw = args._[1];
+	if (raw === undefined) {
+		const latest = journal.latestCheckpoint();
+		if (!latest) {
+			throw new Error(
+				`no checkpoints yet. Run \`preimage checkpoint\` before \`preimage ${command}\`.`,
+			);
+		}
+		return latest.id;
+	}
+	return parseId(raw);
+}
+
 async function cmdShow(args) {
 	const root = resolveRoot(args.flags);
 	const journal = requireJournal(root);
-	const id = parseId(args._[1]);
+	const id = parseOptionalId(args, journal, "show");
 	const cp = journal.getCheckpoint(id);
 	if (!cp) throw new Error(`no checkpoint ${args._[1]}`);
 	const dbTables = journal.listDbTables(id);
@@ -247,11 +273,11 @@ async function cmdShow(args) {
 async function cmdDiff(args) {
 	const root = resolveRoot(args.flags);
 	const journal = requireJournal(root);
-	const id = parseId(args._[1]);
+	const id = parseOptionalId(args, journal, "diff");
 	if (!journal.getCheckpoint(id)) throw new Error(`no checkpoint ${args._[1]}`);
 	const files = diffTree(journal, id, root);
 	const dbs = toArray(args.flags.db);
-	let tables = { missing: [], updated: [], extra: [], identical: 0, errors: [] };
+	let tables = { missing: [], updated: [], extra: [], droppedTables: [], identical: 0, errors: [] };
 	if (dbs.length > 0 || journal.listDbTables(id).length > 0) {
 		tables = diffTables(journal, id, root);
 	}
@@ -273,6 +299,10 @@ async function cmdDiff(args) {
 				process.stdout.write(
 					`  rows: ${tables.missing.length} missing, ${tables.updated.length} changed, ${tables.extra.length} extra\n`,
 				);
+			}
+			// A dropped table is the loudest signal there is, so it leads.
+			for (const t of tables.droppedTables) {
+				process.stdout.write(`  table dropped: ${t.dbPath}:${t.table}\n`);
 			}
 			for (const list of [files.modified, files.removed, files.added]) {
 				for (const item of list.slice(0, 20)) {
@@ -336,8 +366,14 @@ async function cmdRestore(args) {
 			process.stdout.write(`  ${fileResult.written.length} files written\n`);
 			process.stdout.write(`  ${fileResult.unchanged} already identical\n`);
 			if (fileResult.purged.length > 0) process.stdout.write(`  ${fileResult.purged.length} new files removed\n`);
+			if (fileResult.purgedDirs.length > 0) {
+				process.stdout.write(`  ${fileResult.purgedDirs.length} empty directories removed\n`);
+			}
 			if (fileResult.skipped.length > 0) {
 				process.stdout.write(`  ${fileResult.skipped.length} skipped (too large to store)\n`);
+			}
+			if (tableResult.created > 0) {
+				process.stdout.write(`  ${tableResult.created} tables recreated\n`);
 			}
 			if (tableResult.restored > 0) process.stdout.write(`  ${tableResult.restored} rows written\n`);
 			if (tableResult.deleted > 0) process.stdout.write(`  ${tableResult.deleted} rows removed\n`);

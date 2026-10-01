@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    # Publishing is irreversible, so only a tagged commit from main publishes.
+    if: github.repository == 'muraa-p/preimage'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Confirm the tag matches package.json
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          WANTED="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$WANTED" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $WANTED"
+            exit 1
+          fi
+
+      - name: Install and test
+        run: |
+          npm install --no-audit --no-fund
+          npm run check
+          npm test
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag the release on GitHub
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
