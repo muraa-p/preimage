@@ -1,6 +1,6 @@
 {
   "name": "@muraa-p/preimage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The undo layer for AI agents. A write-ahead journal for file and database changes, so an agent's bad edit is a rollback instead of an apology.",
   "type": "module",
   "bin": {
@@ -49,7 +49,9 @@
     "url": "git+https://github.com/muraa-p/preimage.git"
   },
   "homepage": "https://github.com/muraa-p/preimage#readme",
-  "bugs": { "url": "https://github.com/muraa-p/preimage/issues" },
+  "bugs": {
+    "url": "https://github.com/muraa-p/preimage/issues"
+  },
   "dependencies": {},
   "license": "MIT"
 }
