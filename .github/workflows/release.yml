@@ -65,31 +65,25 @@ jobs:
           npm test
 
       # Trusted Publishing is the intended path: no credential in the repo at
-      # all. It only works once the npm package has a Trusted Publisher pointing
-      # at this workflow, which is configured by hand on the package settings
-      # page -- see CONTRIBUTING.md.
+      # all. It works once the npm package has a Trusted Publisher pointing at
+      # this workflow, configured by hand on the package settings page -- see
+      # CONTRIBUTING.md.
       #
-      # Until that is set up, an npm publish with no credential fails with a bare
-      # 404 from the registry, which reads like a missing package rather than a
-      # missing configuration. So say which mode this is, and say what to do.
-      - name: Decide how to authenticate
-        id: auth
-        run: |
-          set -euo pipefail
-          if [ -n "${NPM_TOKEN:-}" ]; then
-            echo "using the NPM_TOKEN secret (Trusted Publishing not configured yet)"
-            echo "token=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "using Trusted Publishing (no secret in this repository)"
-            echo "token=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish
+      # These are two separate steps rather than one step with a conditional env
+      # var on purpose. Setting NODE_AUTH_TOKEN to an empty string is NOT the
+      # same as leaving it unset: npm sees a configured-but-empty token, tries
+      # to authenticate with it, and fails with "need auth" without ever
+      # requesting an OIDC token. A step that does not exist cannot break
+      # authentication that way.
+      - name: Publish (token)
+        if: ${{ secrets.NPM_TOKEN != '' }}
         run: npm publish --provenance --access public
         env:
-          NODE_AUTH_TOKEN: ${{ steps.auth.outputs.token == 'true' && secrets.NPM_TOKEN || '' }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish (Trusted Publishing)
+        if: ${{ secrets.NPM_TOKEN == '' }}
+        run: npm publish --provenance --access public
 
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
