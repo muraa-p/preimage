@@ -9,6 +9,7 @@
 // every dependency there is attack surface.
 
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import { Journal, isRestorable } from "./journal.js";
 import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./capture.js";
 import { restoreFiles } from "./restore.js";
@@ -16,6 +17,15 @@ import { captureTables, diffTables, restoreTables, listTables } from "./dbadapte
 import { journalDir, ensureDir, humanBytes, shortId } from "./util.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
+
+/**
+ * Reported to the client in `initialize`. Read from package.json rather than
+ * written out by hand: a hardcoded string silently goes stale on every release
+ * and is the sort of thing nobody notices until a user reports a version
+ * mismatch. createRequire is used because this file is ESM and package.json is
+ * not reachable by a relative import from a published tarball.
+ */
+const { version: VERSION } = createRequire(import.meta.url)("../package.json");
 
 const TOOLS = [
 	{
@@ -276,7 +286,7 @@ export function createServer({ root = process.cwd(), stdout = process.stdout } =
 				return reply({
 					protocolVersion: PROTOCOL_VERSION,
 					capabilities: { tools: {} },
-					serverInfo: { name: "preimage", version: "0.1.0" },
+					serverInfo: { name: "preimage", version: VERSION },
 				});
 			case "notifications/initialized":
 				return undefined;

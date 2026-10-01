@@ -55,6 +55,22 @@ test("initialize reports server info and tool capability", async (t) => {
 	assert.ok(reply.result.capabilities.tools);
 });
 
+test("the reported version tracks package.json rather than drifting", async (t) => {
+	const root = tmpRoot(t);
+	const mcp = harness(root);
+	const reply = await mcp.request("initialize", {});
+	const pkg = JSON.parse(
+		fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+	);
+	// This was hardcoded at "0.1.0" and stayed that way through three releases,
+	// so a user on 0.3.0 was told the server was 0.1.0.
+	assert.equal(
+		reply.result.serverInfo.version,
+		pkg.version,
+		"serverInfo.version must come from package.json",
+	);
+});
+
 test("tools/list exposes the four tools", async (t) => {
 	const root = tmpRoot(t);
 	const mcp = harness(root);
