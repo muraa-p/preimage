@@ -12,7 +12,7 @@ import { scanTree, persistTree, diffTree, DEFAULT_MAX_FILE_BYTES } from "./captu
 import { restoreFiles } from "./restore.js";
 import { captureTables, diffTables, restoreTables, listTables } from "./dbadapter.js";
 import { unifiedDiff, renderUnified } from "./udiff.js";
-import { humanBytes, journalDir, ensureDir, shortId } from "./util.js";
+import { humanBytes, journalDir, ensureDir, shortId, makeColour, colourEnabled } from "./util.js";
 
 const USAGE = `preimage - the undo layer for AI agents
 
@@ -22,7 +22,7 @@ USAGE
 COMMANDS
   init                          Create the journal for the current directory
   checkpoint [label]            Snapshot files (and optionally tables) now
-  list                          List recent checkpoints
+  list                          List recent checkpoints (alias: ls)
   show [id]                     Summarise one checkpoint (default: latest)
   diff [id]                     Show what changed since a checkpoint (default: latest)
   restore <id>                  Put files and tables back to a checkpoint
@@ -370,6 +370,29 @@ function buildHunks(journal, id, root, modified) {
 	return out;
 }
 
+/**
+ * Apply colour to a rendered patch.
+ *
+ * Deliberately operates on the rendered text rather than inside the diff
+ * engine, so the patch the caller gets back in `--json` stays clean bytes. The
+ * same reason git keeps colour out of `git diff` unless asked.
+ */
+function colourPatch(patch, c) {
+	return patch
+		.split("\n")
+		.map((line) => {
+			if (line.startsWith("+++") || line.startsWith("---")) {
+				return c("bold", line);
+			}
+			if (line.startsWith("@@")) return c("cyan", line);
+			if (line.startsWith("\\")) return c("dim", line);
+			if (line.startsWith("+")) return c("green", line);
+			if (line.startsWith("-")) return c("red", line);
+			return line;
+		})
+		.join("\n");
+}
+
 async function cmdDiff(args) {
 	const root = resolveRoot(args.flags);
 	const journal = requireJournal(root);
@@ -416,36 +439,50 @@ async function cmdDiff(args) {
 	emit(
 		args,
 		() => {
+			const c = makeColour(colourEnabled(args.flags));
 			process.stdout.write(`diff against checkpoint ${shortId(id)}\n`);
-			process.stdout.write(`  ${plain.added.length} added\n`);
-			process.stdout.write(`  ${plain.modified.length} modified\n`);
-			process.stdout.write(`  ${plain.removed.length} deleted\n`);
+			process.stdout.write(`  ${c("green", plain.added.length)} added\n`);
+			process.stdout.write(`  ${c("yellow", plain.modified.length)} modified\n`);
+			process.stdout.write(`  ${c("red", plain.removed.length)} deleted\n`);
 			process.stdout.write(`  ${files.unchanged.length} unchanged\n`);
 			if (files.unreadable.length > 0) {
-				process.stdout.write(`  ${files.unreadable.length} unreadable from journal\n`);
+				process.stdout.write(
+					`  ${c("red", files.unreadable.length)} unreadable from journal\n`,
+				);
 			}
 			const rowTotal =
 				tables.missing.length + tables.updated.length + tables.extra.length + tables.droppedTables.length;
 			if (rowTotal > 0) {
 				process.stdout.write(
-					`  rows: ${tables.missing.length} missing, ${tables.updated.length} changed, ${tables.extra.length} extra\n`,
+					`  rows: ${c("red", tables.missing.length)} missing, ` +
+						`${c("yellow", tables.updated.length)} changed, ` +
+						`${c("green", tables.extra.length)} extra\n`,
 				);
 			}
 			// A dropped table is the loudest signal there is, so it leads.
 			for (const t of tables.droppedTables) {
-				process.stdout.write(`  table dropped: ${t.dbPath}:${t.table}\n`);
+				process.stdout.write(`  ${c("bold", "table dropped")}: ${c("red", `${t.dbPath}:${t.table}`)}\n`);
 			}
-			for (const list of [plain.modified, plain.removed, plain.added]) {
+			for (const [list, colour] of [
+				[plain.modified, "yellow"],
+				[plain.removed, "red"],
+				[plain.added, "green"],
+			]) {
 				for (const item of list.slice(0, 20)) {
-					process.stdout.write(`    ${pathOf(item)}\n`);
+					process.stdout.write(`    ${c(colour, pathOf(item))}\n`);
 				}
 			}
-			// The hunks, in `diff -u` form so they read exactly like git's.
+			// The hunks, in `diff -u` form so they read exactly like git's --
+			// including git's colouring, which is presentation rather than format
+			// and so is applied here instead of in the patch itself. Piping to a
+			// file still gives clean, unmarked text.
 			for (const entry of hunks) {
-				process.stdout.write(`\n${entry.patch}\n`);
+				process.stdout.write(`\n${colourPatch(entry.patch, c)}\n`);
 			}
 			if (hunks.length === 0 && plain.modified.length > 0 && wantHunks) {
-				process.stdout.write("\n  (no line-level diff: nothing readable to show)\n");
+				process.stdout.write(
+					`\n  ${c("dim", "(no line-level diff: nothing readable to show)")}\n`,
+				);
 			}
 		},
 		() => ({

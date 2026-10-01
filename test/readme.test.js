@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const ROOT = new URL("../", import.meta.url);
+const ROOT_PATH = fileURLToPath(ROOT);
 const README = fs.readFileSync(new URL("README.md", ROOT), "utf8");
-const BIN = fileURLToPath(new URL("../bin/preimage.js", import.meta.url));
+const BIN = path.join(ROOT_PATH, "bin", "preimage.js");
 
 /** Every ``` fenced block that looks like a shell transcript. */
 function transcriptBlocks() {
@@ -30,7 +32,7 @@ test("the tests badge matches the number of tests actually in the suite", () => 
 
 	// Counted from the test files rather than hardcoded, so adding a test fails
 	// this until the badge is updated -- which is the whole point.
-	const testDir = fileURLToPath(new URL("test/", ROOT));
+	const testDir = path.join(ROOT_PATH, "test");
 	const declared = fs
 		.readdirSync(testDir)
 		.filter((f) => f.endsWith(".test.js"))
@@ -40,53 +42,44 @@ test("the tests badge matches the number of tests actually in the suite", () => 
 	assert.equal(claimed, declared, `badge says ${claimed}, suite declares ${declared}`);
 });
 
-test("the README's opening transcript is what the tool actually prints", (t) => {
-	const dir = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(path.join(process.cwd(), "..")), "preimage-readme-")));
-	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+test("the README's opening transcript is what the demo actually prints", () => {
+	// The demo script is the single source of truth: the GIF records it and the
+	// README quotes it, so checking the README against it catches drift in
+	// either direction. Replaying a private copy of the fixture here instead
+	// would be a third thing to keep in sync.
+	const raw = execFileSync(process.execPath, [path.join(ROOT_PATH, "scripts", "demo.mjs"), "--story=1"], {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		maxBuffer: 32 * 1024 * 1024,
+	});
 
-	const run = (args) =>
-		execFileSync(process.execPath, [BIN, ...args, "--root", dir], { encoding: "utf8" });
+	// Strip the demo's presentation: the gutter, the prompt, and the placeholder
+	// path, all of which the README formats differently.
+	const lines = raw
+		.split("\n")
+		.map((l) => l.replace(/^[│\s]*/, "").trim())
+		.filter((l) => l && !l.startsWith("$ preimage") && !l.startsWith("$ #") && !l.startsWith("Story"));
 
-	fs.mkdirSync(path.join(dir, "src"), { recursive: true });
-	fs.writeFileSync(
-		path.join(dir, "config.json"),
-		'{\n  "port": 3000,\n  "features": ["search"]\n}\n',
-	);
-	fs.writeFileSync(
-		path.join(dir, "src", "server.js"),
-		`const { port } = require("./config.json");\n\nfunction createServer() {\n  return { port, routes: ["/health"] };\n}\n\nmodule.exports = { createServer };\n`,
-	);
+	assert.ok(lines.length > 15, `demo produced ${lines.length} meaningful lines`);
 
-	const checkpoint = run(["checkpoint", "before agent refactor"]).trimEnd();
-	fs.writeFileSync(path.join(dir, "EMERGENCY.js"), "// created at 2am, don't ask\n");
-	fs.rmSync(path.join(dir, "src", "server.js"));
-	fs.writeFileSync(
-		path.join(dir, "config.json"),
-		'{\n  "port": 9999,\n  "features": ["search", "beta"]\n}\n',
-	);
-	const diff = run(["diff", "1"]).trimEnd();
-	const restore = run(["restore", "1", "--purge", "--yes"]).trimEnd();
-
-	// Every output line the README claims must be produced by a real run. This
-	// is the check that would have caught the transcript going stale when the
-	// diff feature landed and the tool started printing hunks.
-	for (const claimed of [checkpoint, diff, restore]) {
-		for (const line of claimed.split("\n")) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			assert.ok(
-				README.includes(trimmed),
-				`README does not contain a line the tool actually prints:\n  ${trimmed}`,
-			);
-		}
+	for (const line of lines) {
+		// The scripted narration ("config.js rewritten, ...") is written for the
+		// demo, so it is expected to appear verbatim too.
+		assert.ok(
+			README.includes(line),
+			`README does not contain a line the demo prints:\n  ${line}`,
+		);
 	}
+});
 
-	// And the headline: the opening transcript must show a real unified diff,
-	// because that is what `preimage diff` does now.
+test("the opening transcript shows a real unified diff", () => {
 	const opening = transcriptBlocks()[0] ?? "";
-	assert.match(opening, /^--- a\/config\.json$/m, "opening transcript shows a diff header");
-	assert.match(opening, /^-  "port": 3000,$/m);
-	assert.match(opening, /^\+  "port": 9999,$/m);
+	assert.match(opening, /^--- a\/config\.js$/m, "shows the old file");
+	assert.match(opening, /^\+\+\+ b\/config\.js$/m, "shows the new file");
+	assert.match(opening, /^@@ -\d+,\d+ \+\d+,\d+ @@/m, "shows a hunk header");
+	assert.match(opening, /^-[\t ]port: 3000,$/m, "shows a removed line");
+	assert.match(opening, /^\+[\t ]port: Number\(process\.env\.PORT\) \|\| 8080,$/m);
+	assert.match(opening, /✔ \d+ passing, 0 failing/, "closes on the tests passing");
 });
 
 test("no README transcript claims output the tool no longer produces", () => {
@@ -104,8 +97,4 @@ test("no README transcript claims output the tool no longer produces", () => {
 
 function help() {
 	return execFileSync(process.execPath, [BIN, "--help"], { encoding: "utf8" });
-}
-
-function fileURLToPath(u) {
-	return u.pathname.replace(/^\/([A-Za-z]:)/, "$1").replace(/\//g, path.sep);
 }

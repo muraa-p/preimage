@@ -215,6 +215,48 @@ test("a binary file is reported as such rather than as an empty patch", async (t
 	assert.equal(entry.reason, "binary file");
 });
 
+test("diff is coloured for a terminal and clean when piped", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.js", "const port = 3000;\nconst host = 'localhost';\n");
+	await run(["checkpoint", "--root", root]);
+	write(root, "a.js", "const port = 9999;\nconst host = 'localhost';\n");
+
+	const ESC = "";
+
+	// Piped output has no escapes: pasting it into an issue or a file should not
+	// carry terminal control codes along.
+	const { stdout: piped } = await run(["diff", "--root", root]);
+	assert.ok(!piped.includes(ESC), "piped diff must be plain text");
+	assert.match(piped, /^\+const port = 9999;$/m);
+
+	// Forced, it matches what git does to a diff: green additions, red removals,
+	// cyan hunk headers, bold file labels.
+	const { stdout: coloured } = await run(["diff", "--root", root, "--color=always"]);
+	assert.ok(coloured.includes(`${ESC}[32m+const port = 9999;`), "additions are green");
+	assert.ok(coloured.includes(`${ESC}[31m-const port = 3000;`), "removals are red");
+	assert.ok(coloured.includes(`${ESC}[36m@@`), "hunk headers are cyan");
+	assert.ok(coloured.includes(`${ESC}[1m--- a/a.js`), "file labels are bold");
+
+	// --color=never and --no-color each turn it back off on their own.
+	for (const flag of ["--color=never", "--no-color"]) {
+		const { stdout: plain } = await run(["diff", "--root", root, flag]);
+		assert.ok(!plain.includes(ESC), `${flag} should suppress colour`);
+	}
+});
+
+test("--json output never contains colour", async (t) => {
+	const root = tmpRoot(t);
+	write(root, "a.js", "one\n");
+	await run(["checkpoint", "--root", root]);
+	write(root, "a.js", "two\n");
+
+	// An agent parses this. Control codes would be a bug in the contract, so they
+	// are stripped from the payload rather than the patch the caller gets back.
+	const { stdout } = await run(["diff", "--root", root, "--json", "--color=always"]);
+	assert.ok(!stdout.includes(""), "json must be free of escapes");
+	assert.match(JSON.parse(stdout).patches[0].patch, /^\+two$/m);
+});
+
 test("commands fail cleanly without a journal", async (t) => {
 	const root = tmpRoot(t);
 	const { stderr } = await run(["list", "--root", root], { expectFail: true });

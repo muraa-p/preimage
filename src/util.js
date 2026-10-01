@@ -4,6 +4,55 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * ANSI colour, used only when writing to a terminal.
+ *
+ * A diff is the one output where colour carries information rather than
+ * decoration: git colours it, so a monochrome `preimage diff` next to a
+ * coloured `git diff` looks like the less capable of the two. Honoured the
+ * conventions people rely on -- NO_COLOR disables it, and so does --no-color
+ * and --color=never, while --color=always forces it on for piping into a file.
+ */
+/**
+ * Whether colour is wanted, given the environment and the parsed flags.
+ *
+ * Order matters and follows the conventions people already expect from git and
+ * ripgrep:
+ *
+ *   --color=never / --no-color   off, whatever else
+ *   --color=always               on, even when piped
+ *   NO_COLOR                     off, and it wins over the environment too
+ *   FORCE_COLOR / COLOR=always   on
+ *   otherwise                    on only if the output is a terminal
+ */
+export function colourEnabled(flags = {}, stream = process.stdout) {
+	const forced = flags.color;
+	if (forced === "never" || forced === false || flags["no-color"]) return false;
+	if (forced === "always" || forced === true) return true;
+	// COLOUR matches git, which reads both. NO_COLOR still wins, so a user with
+	// it set is never overridden by an ambient variable.
+	if (process.env.NO_COLOR !== undefined) return false;
+	if (process.env.FORCE_COLOR !== undefined || process.env.COLOR === "always") return true;
+	if (forced !== undefined) return false;
+	return Boolean(stream.isTTY);
+}
+
+const CODES = {
+	red: 31,
+	green: 32,
+	yellow: 33,
+	blue: 34,
+	magenta: 35,
+	cyan: 36,
+	bold: 1,
+	dim: 2,
+};
+
+export function makeColour(enabled) {
+	if (!enabled) return (_name, text) => text;
+	return (name, text) => `[${CODES[name] ?? 0}m${text}[0m`;
+}
+
 /** Directory that holds the journal for a given project root. */
 export function journalDir(root) {
 	return path.join(root, ".preimage");

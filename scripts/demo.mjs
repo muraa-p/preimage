@@ -20,6 +20,7 @@ const CLI = path.join(HERE, "..", "bin", "preimage.js");
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
 const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const RESET = "\x1b[0m";
@@ -35,8 +36,11 @@ const hold = (ms) => {
 	if (!paced) return;
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 };
-const STEP_MS = 1400;
-const READ_MS = 2600;
+// Tuned so the whole story lands around 20 seconds. Long enough to read each
+// step, short enough that someone actually watches it -- and every second of
+// hold is a second of near-identical frames in the GIF.
+const STEP_MS = 900;
+const READ_MS = 1700;
 
 function step(label) {
 	process.stdout.write(`\n${c(BOLD, `$ ${label}`)}\n`);
@@ -68,38 +72,154 @@ const want = (n) => only === null || only === String(n);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-"));
 const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "preimage-demo-db-"));
 
+// The file demo runs against a small real service rather than a one-line config
+// blob. Two reasons: a multi-line code diff has context lines, so it is legible
+// in a GIF at the size a README shows it, and the closing beat is the project's
+// own test suite failing and then passing again, which is the thing a viewer
+// actually cares about.
+const CONFIG_BEFORE = `export const config = {
+\tname: "hello-service",
+\tport: 3000,
+\tgreeting: "Hello",
+};
+`;
+
+const CONFIG_AFTER = `export const config = {
+\tname: "hello-service",
+\tport: Number(process.env.PORT) || 8080,
+\tgreeting: "Hi",
+};
+`;
+
+const SERVER_BEFORE = `import http from "node:http";
+import { config } from "./config.js";
+
+const server = http.createServer((req, res) => {
+\tif (req.url === "/health") {
+\t\tres.writeHead(200, { "content-type": "application/json" });
+\t\tres.end(JSON.stringify({ ok: true }));
+\t\treturn;
+\t}
+
+\tres.writeHead(200, { "content-type": "text/plain" });
+\tres.end(\`${"${config.greeting}"} from ${"${config.name}"}!\`);
+});
+
+server.listen(config.port, () => {
+\tconsole.log(\`listening on ${"${config.port}"}\`);
+});
+`;
+
+const TEST = `import assert from "node:assert/strict";
+import { test } from "node:test";
+import { config } from "../config.js";
+
+test("serves a greeting", () => {
+\tassert.match(\`${"${config.greeting}"} from ${"${config.name}"}!\`, /Hello/);
+});
+
+test("uses the default port", () => {
+\tassert.equal(config.port, 3000);
+});
+`;
+
+/**
+ * Run the project's own tests and summarise, the way a person would.
+ *
+ * Reads the `pass`/`fail` totals from node's own summary rather than counting
+ * the ✔ and ✖ lines: when a test fails, node prints it once during the run and
+ * again under "failing tests:", so counting the glyphs reports every failure
+ * twice. It said "5 failing" for a project with two tests.
+ */
+function testSummary(cwd) {
+	// When this script is itself run from a test suite, node exports
+	// NODE_TEST_CONTEXT=child-v8 to the child. The nested `node --test` then
+	// changes behaviour and reports zero tests, so the demo claimed "no tests"
+	// when check/readme.test.js exercised it. Clearing the variable makes the
+	// nested run behave like a normal one.
+	const env = { ...process.env };
+	delete env.NODE_TEST_CONTEXT;
+	delete env.NODE_TEST_WORKER_ID;
+	let out;
+	try {
+		out = execFileSync(process.execPath, ["--test"], { cwd, encoding: "utf8", env });
+	} catch (e) {
+		out = `${e.stdout ?? ""}`;
+	}
+	const pass = Number(/^ℹ pass (\d+)$/m.exec(out)?.[1] ?? 0);
+	const fail = Number(/^ℹ fail (\d+)$/m.exec(out)?.[1] ?? 0);
+	if (fail === 0 && pass > 0) return c(GREEN, `✔ ${pass} passing, 0 failing`);
+	if (fail === 0) return c(DIM, "no tests");
+	return c(RED, `✖ ${fail} failing, ${pass} passing`);
+}
+
 try {
 if (want(1)) {
-	process.stdout.write(c(BOLD, "\nStory 1: the agent rewrote your config and deleted a file\n"));
+	process.stdout.write(c(BOLD, "\nStory 1: the agent changes what it shouldn't have\n"));
 
-	fs.writeFileSync(path.join(dir, "config.json"), '{"port":3000,"db":"prod"}');
-	fs.mkdirSync(path.join(dir, "src"));
-	fs.writeFileSync(path.join(dir, "src", "server.js"), "const PORT = 3000;\n");
+	const proj = path.join(dir, "hello-service");
+	fs.mkdirSync(path.join(proj, "test"), { recursive: true });
+	fs.writeFileSync(path.join(proj, "config.js"), CONFIG_BEFORE);
+	fs.writeFileSync(path.join(proj, "server.js"), SERVER_BEFORE);
+	fs.writeFileSync(path.join(proj, "test", "config.test.js"), TEST);
+	fs.writeFileSync(
+		path.join(proj, "package.json"),
+		'{\n  "name": "hello-service",\n  "type": "module"\n}\n',
+	);
 
-	step(`preimage checkpoint "before agent refactor" --root <project>`);
-	show(run(["checkpoint", "before agent refactor", "--root", dir]));
+	step(`preimage checkpoint "before the agent gets creative" --root <project>`);
+	show(run(["checkpoint", "before the agent gets creative", "--root", proj]));
 
-	step("# the agent has its way with your files");
-	fs.writeFileSync(path.join(dir, "config.json"), '{"port":9999,"db":"prod"}');
-	fs.writeFileSync(path.join(dir, "EMERGENCY.js"), "// created at 2am\n");
-	fs.rmSync(path.join(dir, "src", "server.js"));
+	step("# the agent quietly changes the port and the greeting, and leaves a stray file");
+	// Only config.js is touched. An earlier version also appended a stray
+	// console.log to server.js, which made the diff show a second near-identical
+	// hunk and told the story no better. One clean hunk reads better on a
+	// README-sized image, and server.js still demonstrates the point: it is in
+	// the checkpoint, and it is not in the diff, because it did not change.
+	fs.writeFileSync(path.join(proj, "config.js"), CONFIG_AFTER);
+	fs.writeFileSync(path.join(proj, "DEBUG.md"), "# scratch notes, will delete later\n");
 	process.stdout.write(
-		`${c(DIM, "│")} ${c(YELLOW, "config.json rewritten, src/server.js deleted, EMERGENCY.js added")}\n`,
+		`${c(DIM, "│")} ${c(YELLOW, "config.js rewritten, DEBUG.md added")}\n`,
 	);
 	hold(READ_MS);
 
+	step("# the project's own tests notice");
+	process.stdout.write(`${c(DIM, "│")} ${testSummary(proj)}\n`);
+	hold(READ_MS);
+
+	// Colour the diff the way a terminal would, so the GIF shows what a user
+	// actually sees. When the output is not a terminal -- the plain-text README
+	// transcript -- NO_COLOR is forced instead, so the two forms can never
+	// disagree by accident.
+	const wantColour =
+		process.stdout.isTTY ||
+		process.env.FORCE_COLOR !== undefined ||
+		process.env.COLOR === "always";
+	const env = { ...process.env };
+	if (wantColour) {
+		env.COLOR = "always";
+		delete env.NO_COLOR;
+	} else {
+		env.NO_COLOR = "1";
+	}
+	const showRun = (args) =>
+		show(execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8", env }));
+
 	step(`preimage diff 1 --root <project>`);
-	show(run(["diff", "1", "--root", dir]));
+	showRun(["diff", "1", "--root", proj]);
 
 	step(`preimage restore 1 --root <project> --purge --yes`);
-	show(run(["restore", "1", "--root", dir, "--purge", "--yes"]));
+	showRun(["restore", "1", "--root", proj, "--purge", "--yes"]);
 
-	step("state afterwards");
-	show(
-		`config.json: ${fs.readFileSync(path.join(dir, "config.json"), "utf8")}\n` +
-			`src/server.js: restored\n` +
-			`EMERGENCY.js: ${fs.existsSync(path.join(dir, "EMERGENCY.js")) ? "still here" : c(GREEN, "gone")}`,
+	step("# tests again, after the rollback");
+	process.stdout.write(`${c(DIM, "│")} ${testSummary(proj)}\n`);
+	hold(READ_MS);
+
+	step("and the stray file");
+	process.stdout.write(
+		`${c(DIM, "│")} DEBUG.md: ${fs.existsSync(path.join(proj, "DEBUG.md")) ? c(RED, "still here") : c(GREEN, "gone")}\n`,
 	);
+	hold(READ_MS);
 }
 
 if (want(2)) {

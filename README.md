@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@muraa-p/preimage.svg)](https://www.npmjs.com/package/@muraa-p/preimage)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-brightgreen.svg)](https://nodejs.org/)
 [![License](https://img.shields.io/npm/l/preimage.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-135%20passing-brightgreen)](#development)
+[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen)](#development)
 
 **The undo layer for AI agents.**
 
@@ -18,39 +18,51 @@ byte-for-byte — including database rows git has never heard of.
 ![preimage rolling back an agent's file edits](docs/demo-files.gif)
 
 ```
-$ preimage checkpoint "before agent refactor"
+$ preimage checkpoint "before the agent gets creative"
 checkpoint 0001 created
-  2 files, 193 B
+  4 files, 893 B
 
-$ # the agent has its way with your files
+$ # the agent quietly changes the port and the greeting, and leaves a stray file
+│ config.js rewritten, DEBUG.md added
+
+$ # the project's own tests notice
+✖ 2 failing, 0 passing
+
 $ preimage diff 1
 diff against checkpoint 0001
   1 added
   1 modified
-  1 deleted
-  0 unchanged
-    config.json
-    src/server.js
-    EMERGENCY.js
+  0 deleted
+  3 unchanged
+    config.js
+    DEBUG.md
 
---- a/config.json
-+++ b/config.json
-@@ -1,4 +1,4 @@
- {
--  "port": 3000,
--  "features": ["search"]
-+  "port": 9999,
-+  "features": ["search", "beta"]
- }
+--- a/config.js
++++ b/config.js
+@@ -1,5 +1,5 @@
+ export const config = {
+ 	name: "hello-service",
+-	port: 3000,
+-	greeting: "Hello",
++	port: Number(process.env.PORT) || 8080,
++	greeting: "Hi",
+ };
 
-$ preimage restore 1 --purge
-restored checkpoint 0001 (before agent refactor)
-  2 files written
-  0 already identical
+$ preimage restore 1 --purge --yes
+restored checkpoint 0001 (before the agent gets creative)
+  1 files written
+  3 already identical
   1 new files removed
+
+$ # tests again, after the rollback
+✔ 2 passing, 0 failing
+
+$ and the stray file
+│ DEBUG.md: gone
 ```
 
-Config is back. The deleted file is back. The 2am special is gone.
+The project's own tests go from failing to passing, and the scratch file the
+agent left behind is gone.
 
 Now the part git can never do:
 
@@ -417,7 +429,7 @@ Worth knowing before you rely on it:
 ## Development
 
 ```bash
-npm test          # 135 tests, node:test
+npm test          # 149 tests, node:test
 npm run check     # syntax check every entrypoint
 node scripts/demo.mjs             # all three stories, instant
 node scripts/demo.mjs --story=1   # just one story
