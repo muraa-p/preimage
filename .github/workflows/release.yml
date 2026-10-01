@@ -5,9 +5,9 @@ on:
     tags: ["v*"]
 
 # contents: write  -> create the GitHub release
-# id-token: write  -> required by `npm publish --provenance`, which is what puts
-#                     the "published from muraa-p/preimage@<sha>" stamp on the
-#                     package. Without it the publish step fails outright.
+# id-token: write  -> mints the OIDC token npm Trusted Publishing authenticates
+#                     with, and is also what `--provenance` needs for the
+#                     "published from muraa-p/preimage@<sha>" stamp.
 permissions:
   contents: write
   id-token: write
@@ -25,7 +25,18 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
+          # registry-url writes an .npmrc pointing at npmjs. No authToken is set
+          # on purpose: Trusted Publishing has no token to configure.
           registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing needs npm 11.5.1 or newer. Node 24 ships an older npm
+      # 11.x, so upgrade unconditionally rather than parsing version strings in
+      # shell. This job runs once per release; a few seconds is not worth a
+      # comparison that is awkward to test and easy to get wrong.
+      - name: Upgrade npm
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version) on node $(node --version)"
 
       - name: Confirm the tag matches package.json
         run: |
@@ -53,10 +64,11 @@ jobs:
           npm run check
           npm test
 
+      # No NODE_AUTH_TOKEN. If Trusted Publishing is not configured on the npm
+      # side this fails with a 401, which is the correct and intended signal:
+      # there is no long-lived secret to fall back to, and that is the point.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2

@@ -55,6 +55,30 @@ owns. That test is the reason it stays fixed.
 - Comments explain *why*. The code already says what.
 - Keep public functions small enough that their failure modes are readable.
 
+## Releasing
+
+Releases publish to npm from GitHub Actions with **Trusted Publishing**, so
+there is no long-lived token in the repository. The npm side is configured once,
+by hand:
+
+1. npm → `@muraa-p/preimage` → **Settings** → **Trusted Publisher** → **Add
+   GitHub Actions**
+2. Fill in:
+   - **Organization / user**: `muraa-p`
+   - **Repository**: `preimage`
+   - **Workflow filename**: `release.yml`
+3. Bump `version` in `package.json`, commit, then tag and push:
+
+```sh
+npm version patch --no-git-tag-version
+git commit -am "Release v0.1.1"
+git tag -a v0.1.1 -m "Release v0.1.1"
+git push origin main --follow-tags
+```
+
+The workflow refuses to publish if the tag does not match `package.json`, or if
+that version already exists on npm. There is no token to rotate or leak.
+
 ## Reporting bugs
 
 Open an issue with:
