@@ -58,8 +58,15 @@ owns. That test is the reason it stays fixed.
 ## Releasing
 
 Releases publish to npm from GitHub Actions with **Trusted Publishing**, so
-there is no long-lived token in the repository. The npm side is configured once,
-by hand:
+there is no long-lived token in the repository.
+
+The workflow picks its credential at run time: if an `NPM_TOKEN` secret exists it
+uses that, otherwise it publishes via Trusted Publishing. That is deliberate, so
+the one-time npm setup below does not have to happen before anything can be
+published. Once Trusted Publishing is configured, delete the `NPM_TOKEN` secret
+and the workflow will keep working with no credential in the repo at all.
+
+Setting up the npm side, once, by hand:
 
 1. npm → `@muraa-p/preimage` → **Settings** → **Trusted Publisher** → **Add
    GitHub Actions**
@@ -77,7 +84,12 @@ git push origin main --follow-tags
 ```
 
 The workflow refuses to publish if the tag does not match `package.json`, or if
-that version already exists on npm. There is no token to rotate or leak.
+that version already exists on npm.
+
+If a publish fails with `404 Not Found - PUT .../@muraa-p/preimage`, that is
+Trusted Publishing not being configured on the npm side yet, not a missing
+package. Either finish the setup above, or add an `NPM_TOKEN` secret with Read
+and Write access plus **Bypass 2FA**, and re-run the failed job.
 
 ## Reporting bugs
 

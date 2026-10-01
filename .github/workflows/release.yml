@@ -25,8 +25,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
-          # registry-url writes an .npmrc pointing at npmjs. No authToken is set
-          # on purpose: Trusted Publishing has no token to configure.
+          # registry-url writes an .npmrc pointing at npmjs. The authToken line
+          # is added by the Publish step only if a token secret exists.
           registry-url: https://registry.npmjs.org
 
       # Trusted Publishing needs npm 11.5.1 or newer. Node 24 ships an older npm
@@ -64,11 +64,32 @@ jobs:
           npm run check
           npm test
 
-      # No NODE_AUTH_TOKEN. If Trusted Publishing is not configured on the npm
-      # side this fails with a 401, which is the correct and intended signal:
-      # there is no long-lived secret to fall back to, and that is the point.
+      # Trusted Publishing is the intended path: no credential in the repo at
+      # all. It only works once the npm package has a Trusted Publisher pointing
+      # at this workflow, which is configured by hand on the package settings
+      # page -- see CONTRIBUTING.md.
+      #
+      # Until that is set up, an npm publish with no credential fails with a bare
+      # 404 from the registry, which reads like a missing package rather than a
+      # missing configuration. So say which mode this is, and say what to do.
+      - name: Decide how to authenticate
+        id: auth
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "using the NPM_TOKEN secret (Trusted Publishing not configured yet)"
+            echo "token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "using Trusted Publishing (no secret in this repository)"
+            echo "token=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.auth.outputs.token == 'true' && secrets.NPM_TOKEN || '' }}
 
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
