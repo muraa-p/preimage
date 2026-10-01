@@ -127,6 +127,37 @@ no native build step and no supply chain to audit).
 
 Then wire it to your agent — see [Agent integration](#agent-integration).
 
+### If you're on Windows
+
+Two things that are not preimage's fault, and that will otherwise look like it is:
+
+**PowerShell blocks the command.** npm installs a `.ps1` shim, and the default
+`ExecutionPolicy` refuses to run it:
+
+```
+preimage : File ...\npm\preimage.ps1 cannot be loaded because running scripts is
+disabled on this system.
+```
+
+Either call `preimage.cmd` instead (`preimage.cmd checkpoint`), or widen the
+policy once:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+**Node cannot spawn the `.cmd` without a shell.** If you are calling preimage
+from a script rather than a terminal, `execFile("preimage", ...)` fails with
+`EINVAL`. Use `shell: true`, or point at the entry point directly:
+
+```js
+const bin = "C:/Users/You/AppData/Roaming/npm/node_modules/@muraa-p/preimage/bin/preimage.js";
+execFileSync(process.execPath, [bin, "checkpoint", "before the refactor"]);
+```
+
+MCP is unaffected by all of this — the client launches the server, not your
+shell.
+
 ## Why this exists
 
 The tooling around coding agents is very good at *watching* them. Session
